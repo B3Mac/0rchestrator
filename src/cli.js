@@ -13,6 +13,7 @@ import { handoffPrompt, conductorPrompt, reviewPrompt } from './prompt.js';
 import {
   resolvePlayer, claimTask, unclaimTask, play, claimableTasks, submitTask, acceptTask, reopenTask,
   releaseExpired, flagPlayer, banPlayer, unbanPlayer, listPlayers, collectFork, checkTask,
+  guardGithubMode, pullRequestHint,
 } from './ops.js';
 import { statsFor, isFlagged } from './trust.js';
 import { packTask, unpackTask } from './packet.js';
@@ -88,7 +89,10 @@ command('doctor', {
     results.forEach((r) => out(`${mark[r.level]} ${r.msg}`));
     const errors = results.filter((r) => r.level === 'error').length;
     const warns = results.filter((r) => r.level === 'warn').length;
-    out(`\n${errors ? c.red(`${errors} problem${errors === 1 ? '' : 's'} to fix`) : c.green('Ready for volunteers')}${warns ? `, ${warns} warning${warns === 1 ? '' : 's'}` : ''}.`);
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    if (errors) out(`\n${c.red(`${plural(errors, 'problem')} to fix`)}${warns ? `, ${plural(warns, 'warning')}` : ''}.`);
+    else if (warns) out(`\n${c.yellow(`No blockers; ${plural(warns, 'warning')} worth a look.`)}`);
+    else out(`\n${c.green('Ready for volunteers.')}`);
     return errors ? 1 : 0;
   },
 });
@@ -146,6 +150,7 @@ command('play', {
   summary: 'Claim the next task you can take and print its handoff',
   options: { as: { type: 'string' } },
   run({ project, values }) {
+    guardGithubMode(project, 'play');
     const player = resolvePlayer(project, values.as);
     const task = play(project, player);
     if (!task) {
@@ -163,6 +168,7 @@ command('claim', {
   summary: 'Claim a specific task',
   options: { as: { type: 'string' }, force: { type: 'boolean' } },
   run({ project, values, positionals: [id] }) {
+    guardGithubMode(project, 'claim');
     const player = resolvePlayer(project, values.as);
     const task = claimTask(project, need(id, 'task id'), player, { force: values.force });
     out(`${c.green('Claimed')} ${task.meta.id} for ${player}. Run "0rch prompt ${task.meta.id}" for the handoff.`);
@@ -174,6 +180,7 @@ command('unclaim', {
   summary: 'Give a task back so someone else can take it',
   options: { as: { type: 'string' } },
   run({ project, values, positionals: [id] }) {
+    guardGithubMode(project, 'unclaim');
     const task = unclaimTask(project, need(id, 'task id'), { player: values.as });
     out(`Released ${task.meta.id}. It's open again.`);
   },
@@ -206,6 +213,13 @@ command('submit', {
   summary: 'Verify and hand in your work for review',
   options: { as: { type: 'string' } },
   run({ project, values, positionals: [id] }) {
+    if (project.config.workflow === 'github') {
+      const t = getTask(project, need(id, 'task id'));
+      const res = checkTask(project, t);
+      out(colorVerify(describeVerify(res)));
+      out(res.passed ? `\n${pullRequestHint(t)}` : `\n${c.red('Not ready.')} Fix the issues above first.`);
+      return res.passed ? 0 : 2;
+    }
     const { task, result } = submitTask(project, need(id, 'task id'), { player: values.as });
     out(colorVerify(describeVerify(result)));
     if (result.passed) out(`\n${c.green('Submitted')} ${task.meta.id} for review. Thanks for playing!`);

@@ -310,7 +310,10 @@ test('expired claims are released on schedule, unless a PR is open for them', as
   const longAgo = new Date(Date.now() - 50 * 3600 * 1000);
   await env.say('T-0001', 'alice', '/claim', 'NONE', { now: longAgo });
   await env.say('T-0002', 'bob', '/claim', 'NONE', { now: longAgo });
-  env.gh.pulls = [{ number: 301, title: 'T-0001: almost there', head: { ref: 'x' } }];
+  env.gh.pulls = [
+    { number: 301, title: 'T-0001: almost there', head: { ref: 'x' }, user: { login: 'alice' } },
+    { number: 302, title: 'T-0002 keep it locked', head: { ref: 'y' }, user: { login: 'mallory' } },
+  ];
   const res = await env.run('schedule', { schedule: '17 */6 * * *' });
   assert.equal(res.exitCode, 0, res.summary);
   const p = env.origin();
@@ -410,4 +413,48 @@ test('doctor catches the common setup mistakes', () => {
   const good = doctor(EXAMPLE);
   assert.ok(!good.some((x) => x.level === 'error'), levels(good));
   assert.ok(loadTasks(loadProject(EXAMPLE)).length === 4);
+});
+
+test('in GitHub mode, local claim commands point to GitHub and submit points to a PR', () => {
+  const env = setup();
+  const dir = env.clone('volunteer');
+  const play = cli(dir, ['play', '--as', 'zoe']);
+  assert.equal(play.code, 1);
+  assert.match(play.stderr, /GitHub mode.*comment `\/claim` on the task's GitHub issue\. Ready now: T-0001, T-0002, T-0003\./);
+  assert.match(cli(dir, ['unclaim', '1']).stderr, /comment `\/unclaim`/);
+  write(dir, 'src/slugify.js', SOLUTIONS['src/slugify.js']);
+  const sub = cli(dir, ['submit', '1']);
+  assert.equal(sub.code, 0, sub.stdout + sub.stderr);
+  assert.match(sub.stdout, /gh pr create --title "T-0001: Implement slugify\(\)"/);
+  assert.match(cli(dir, ['prompt', '1']).stdout, /Open a pull request titled `T-0001: Implement slugify\(\)`/);
+});
+
+test('hardening: fake task issues, huge PRs, other branches and odd names', async () => {
+  const env = setup();
+  await env.run('push', {});
+  // An unlabeled issue someone made to look like a task.
+  const fake = { number: 77, title: 'T-0001 · totally real', state: 'open', labels: [] };
+  await env.run('issue_comment', { action: 'created', issue: fake, comment: { id: 5, body: '/claim', user: { login: 'eve', type: 'User' }, author_association: 'NONE' } });
+  assert.equal(getTask(env.origin(), 'T-0001').meta.status, 'open');
+  assert.match(env.gh.on(77)[0].body, /use `\/claim` on a task's issue/);
+
+  await env.say('T-0001', 'alice', '/claim');
+  env.gh.prFiles[401] = ['src/slugify.js'];
+  const pull = (extra) => env.run('pull_request_target', {
+    action: 'opened', number: 401, sender: { login: 'alice' },
+    pull_request: { number: 401, title: 'T-0001: slugify', merged: false, user: { login: 'alice', type: 'User' }, head: { ref: 'p' }, base: { ref: 'main', sha: 'x' }, ...extra },
+  });
+  assert.equal((await pull({ changed_files: 1 })).exitCode, 0);
+  const huge = await pull({ changed_files: 3500 });
+  assert.equal(huge.exitCode, 1);
+  assert.match(huge.summary, /Changes 3500 files, more than can be checked/);
+  const other = await pull({ base: { ref: 'release-1.x', sha: 'x' } });
+  assert.match(other.summary, /only PRs into main count/);
+
+  env.gh.prFiles[402] = ['src/a`b`.js\n@everyone'];
+  await env.pr('opened', { number: 402, title: 'T-0001 x', login: 'alice', files: env.gh.prFiles[402] });
+  assert.match(env.gh.on(402)[0].body, /`` src\/a`b`\.js @everyone ``/);
+
+  await env.say('T-0001', 'bob', '/trust @x](https://evil.example)');
+  assert.match(env.gh.on(env.issueFor('T-0001').number).at(-1).body, /^@bob: trust/);
 });

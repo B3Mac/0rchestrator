@@ -17,6 +17,29 @@ import {
 import { matchesScope } from './scope.js';
 import { bookkeepingPaths } from './project.js';
 
+/**
+ * In GitHub mode the default branch is the source of truth: claims happen with
+ * /claim on the task's issue and work arrives as a pull request. Local claim
+ * commands would only change the volunteer's own copy, so they explain that.
+ */
+export function guardGithubMode(project, action) {
+  if (project.config.workflow !== 'github') return;
+  const tasks = loadTasks(project);
+  const readiness = computeReadiness(tasks);
+  const ready = tasks.filter((t) => readiness.get(t.meta.id).ready).map((t) => t.meta.id);
+  const where = action === 'unclaim' ? 'comment `/unclaim` on the task\'s GitHub issue' : 'comment `/claim` on the task\'s GitHub issue';
+  throw new OrchError(
+    `This project uses GitHub mode, so ${action === 'unclaim' ? 'give tasks back' : 'claims happen'} on GitHub: ${where}.${action !== 'unclaim' && ready.length ? ` Ready now: ${ready.join(', ')}.` : ''}`,
+    'GITHUB_MODE',
+  );
+}
+
+/** What to tell a GitHub-mode volunteer whose work passes verify. */
+export function pullRequestHint(task) {
+  const title = `${task.meta.id}: ${task.meta.title}`;
+  return `Looks good. Push your branch and open a pull request titled "${title}":\n  gh pr create --title ${JSON.stringify(title)}`;
+}
+
 /** Who is acting: --as, then $ORCH_VOLUNTEER, then git user.name, then the OS user. */
 export function resolvePlayer(project, given) {
   const name = given || process.env.ORCH_VOLUNTEER || gitUserName(project.root) || os.userInfo().username;

@@ -80,15 +80,23 @@ export function parseCommand(body) {
   if (!m || !COMMANDS.has(m[1].toLowerCase())) return null;
   const rest = (m[2] ?? '').trim();
   const [first = '', ...more] = rest.split(/\s+/);
-  const target = first.startsWith('@') ? first.slice(1) : null;
-  return { name: m[1].toLowerCase(), rest, target, reason: target ? more.join(' ') : rest };
+  const handle = first.startsWith('@') ? first.slice(1) : null;
+  const target = handle && LOGIN.test(handle) ? handle : null;
+  return { name: m[1].toLowerCase(), rest, target, reason: handle ? more.join(' ') : rest };
 }
 
 export function issueTitle(task) {
   return `${task.meta.id} · ${task.meta.title}`;
 }
 
-const code = (s) => `\`${s}\``;
+/** Inline code that stays inline code whatever the text holds (file names come from PRs). */
+const code = (raw) => {
+  const s = String(raw).replace(/[\r\n]+/g, ' ');
+  if (!s.includes('`')) return `\`${s}\``;
+  const run = Math.max(...[...s.matchAll(/`+/g)].map((m) => m[0].length)) + 1;
+  return `${'`'.repeat(run)} ${s} ${'`'.repeat(run)}`;
+};
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const list = (xs) => xs.map(code).join(', ');
 
 export function issueBody(project, task) {
@@ -351,8 +359,10 @@ async function onComment(ctx, payload) {
   const reply = (body) => say(ctx, n, body);
   ctx.summary.push(`@${login} commented \`/${cmd.name}\` on #${n}.`);
 
+  const label = loadProject(ctx.root).config.github?.label ?? '0rchestrator';
+  const labeled = (issue.labels ?? []).some((l) => (typeof l === 'string' ? l : l.name) === label);
   const needTask = async () => {
-    if (issue.pull_request || !id) {
+    if (issue.pull_request || !id || !labeled) {
       await reply(`@${login} use \`/${cmd.name}\` on a task's issue (their titles start with a task id like T-0003).`);
       return false;
     }
@@ -457,10 +467,20 @@ async function onPullRequest(ctx, payload) {
     ctx.summary.push('Not a 0rchestrator task PR (no task id like T-0003 in its title or branch), so nothing to check.');
     return;
   }
+  if (pr.base?.ref && pr.base.ref !== ctx.branch) {
+    ctx.summary.push(`PR #${pr.number} targets ${pr.base.ref}, not ${ctx.branch}; only PRs into ${ctx.branch} count.`);
+    return;
+  }
   const author = pr.user.login;
   const files = await ctx.api.prFiles(pr.number);
   const project = loadProject(ctx.root);
   const report = checkPullRequest(project, { id, author, files });
+  // GitHub lists at most 3,000 files per PR; anything it can't list can't be checked.
+  if (Number(pr.changed_files) > files.length) {
+    report.ok = false;
+    report.scope.passed = false;
+    report.reasons.push(`Changes ${pr.changed_files} files, more than can be checked. Split it into smaller PRs.`);
+  }
   const bad = [...report.scope.protected, ...report.scope.outside];
   const ownClaim = report.task && ACTIVE.includes(report.task.meta.status) && playerKey(report.task.meta.claimed_by) === playerKey(author);
   if (bad.length && ownClaim) {
@@ -480,6 +500,7 @@ async function onMerged(ctx, payload) {
   const pr = payload.pull_request;
   const id = taskIdFrom(pr.title, pr.head?.ref);
   if (!id) return;
+  if (pr.base?.ref && pr.base.ref !== ctx.branch) return;
   const author = pr.user.login;
   const by = payload.sender?.login ?? pr.merged_by?.login ?? null;
   let res;
@@ -518,7 +539,13 @@ async function onMerged(ctx, payload) {
 
 async function onSchedule(ctx) {
   const open = await ctx.api.listOpenPulls();
-  const keep = new Set(open.map((p) => taskIdFrom(p.title, p.head?.ref)).filter(Boolean));
+  const tasks = new Map(loadTasks(loadProject(ctx.root)).map((t) => [t.meta.id, t]));
+  // A claim stays alive while its claimer has a PR open for it (anyone else's PR doesn't count).
+  const keep = new Set(open.map((p) => {
+    const id = taskIdFrom(p.title, p.head?.ref);
+    const t = id && tasks.get(id);
+    return t && playerKey(t.meta.claimed_by) === playerKey(p.user?.login) ? id : null;
+  }).filter(Boolean));
   const released = await transact(ctx, 'Release expired claims', (p) => releaseExpired(p, { now: ctx.now, keep }));
   if (!released.length) {
     ctx.summary.push('No expired claims.');
