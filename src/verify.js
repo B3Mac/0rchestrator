@@ -5,6 +5,30 @@ import { matchesScope } from './scope.js';
 
 const OUTPUT_TAIL = 4000;
 
+/** Run one shell command as a check. Never throws for a failing command. */
+export function runCheck(cmd, { cwd, timeoutSeconds = 600, env = {} } = {}) {
+  // If 0rch itself runs under `node --test`, don't let that leak into the project's own test run.
+  const { NODE_TEST_CONTEXT, ...base } = process.env;
+  const run = spawnSync(cmd, {
+    cwd,
+    shell: true,
+    encoding: 'utf8',
+    timeout: timeoutSeconds * 1000,
+    env: { ...base, ...env },
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  const timedOut = run.error?.code === 'ETIMEDOUT';
+  return {
+    ran: true,
+    cmd,
+    exit_code: run.status,
+    timed_out: timedOut,
+    passed: run.status === 0 && !timedOut,
+    output: output.length > OUTPUT_TAIL ? '…' + output.slice(-OUTPUT_TAIL) : output,
+  };
+}
+
 export function verifyCommandFor(project, task) {
   if (task.meta.verify) return task.meta.verify;
   const type = project.config.task_types[task.meta.type];
@@ -44,24 +68,11 @@ export function verifyTask(project, task, { runCommand = true, changed: given = 
   } else if (!runCommand) {
     result.command = { ran: false, passed: true, cmd, reason: 'Skipped.' };
   } else {
-    const run = spawnSync(cmd, {
+    result.command = runCheck(cmd, {
       cwd: project.root,
-      shell: true,
-      encoding: 'utf8',
-      timeout: project.config.verify_timeout_seconds * 1000,
-      env: { ...process.env, ORCH_TASK: task.meta.id },
-      maxBuffer: 32 * 1024 * 1024,
+      timeoutSeconds: project.config.verify_timeout_seconds,
+      env: { ORCH_TASK: task.meta.id },
     });
-    const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
-    const timedOut = run.error?.code === 'ETIMEDOUT';
-    result.command = {
-      ran: true,
-      cmd,
-      exit_code: run.status,
-      timed_out: timedOut,
-      passed: run.status === 0 && !timedOut,
-      output: output.length > OUTPUT_TAIL ? '…' + output.slice(-OUTPUT_TAIL) : output,
-    };
   }
 
   result.passed = Boolean(result.scope.passed && result.command.passed);

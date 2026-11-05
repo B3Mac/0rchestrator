@@ -1,4 +1,4 @@
-# The 0rchestrator protocol (v0.1)
+# The 0rchestrator protocol (v0.2)
 
 Any git repo that follows this layout can take volunteers. The `0rch` CLI and
 MCP server implement it; nothing else is required.
@@ -15,6 +15,7 @@ MCP server implement it; nothing else is required.
 | `.0rchestrator/CONDUCTOR.md`, `PLAYER.md` | Owner | Instructions for agents |
 | `.0rchestrator/redactions/` | CLI | Private: redaction keys. Git-ignored, never shared |
 | `.0rchestrator/packets/` | CLI | Private: packets built for volunteers. Git-ignored |
+| `.github/workflows/0rchestrator.yml` | Owner (`init --github`) | GitHub mode: the bot |
 
 Volunteers never edit `tasks/` or `.0rchestrator/` by hand. In fork and packet
 mode, changes there are ignored; in a shared tree they are bookkeeping written
@@ -25,6 +26,10 @@ by the CLI.
 ```yaml
 name: textkit
 visibility: public            # or private
+workflow: local               # or github: tasks are issues, work arrives as PRs
+setup: null                   # command run before checks in a fresh checkout, e.g. npm ci
+github:
+  label: 0rchestrator         # label on task issues
 goal: GOAL.md
 roadmap: ROADMAP.md
 tasks_dir: tasks
@@ -76,6 +81,7 @@ A task is Markdown with YAML front matter:
 | `claimed_by`, `claimed_at`, `base` | Set on claim (`base` = the commit the work starts from) |
 | `submitted_at`, `submitted_files` | Set on submit (`submitted_files` = a sha256 of each submitted file) |
 | `completed_at` | Set on accept |
+| `pr` | GitHub mode: the pull request that finished it |
 
 The body has `## Goal`, `## Acceptance criteria` and `## Notes`. Reopening
 adds dated lines under `## Review notes`.
@@ -137,6 +143,63 @@ A player's score is `starting_score` plus each event's points in order,
 clamped to 0–100. Names are case-insensitive. Tiers: `banned`, `fenced` (below
 the small fence), `new` (nothing accepted yet), `member`, `trusted` (meets the
 sensitive fence).
+
+## GitHub mode
+
+With `workflow: github`, the default branch is the source of truth and the
+workflow from `0rch init --github` keeps it up to date. Only the bot (running
+as `github-actions[bot]`) writes `tasks/` and the ledger.
+
+| Event | Job | What happens |
+| --- | --- | --- |
+| Push to the default branch touching `tasks/` or the config | bookkeeping | One issue per task, labeled `github.label` and titled `T-0003 · <title>`. Closes issues of done tasks and reopens reopened ones |
+| Comment starting with `/` | bookkeeping | Runs the command below |
+| PR opened, pushed to or retitled (`pull_request_target`) | scope | Checks the PR (rules below), comments one updatable report, fails if it doesn't pass |
+| Same PR (`pull_request`) | tests | Runs `setup` and the task's check against the PR's code |
+| PR merged | bookkeeping | Marks the task done, credits the PR author, closes the issue |
+| Every 6 hours, or a manual run | bookkeeping | Releases expired claims (skipping tasks with an open PR) and re-syncs issues |
+
+**Which task a PR is for:** the first task id (`T-0003`, `t3`, `T-3`) in its
+title, else in its branch name. PRs without one are ignored.
+
+**A PR passes the scope check when** the task exists and is claimed by the
+PR's author, the author still passes the task's fences, every changed path
+(including the old names of renamed files) is inside the task's scope, and
+none is protected: `tasks/`, `.0rchestrator/`, `0rchestrator.yml` or
+`.github/`.
+
+**Trust model.** The scope job runs the workflow from the default branch with
+a write token, but only reads the PR's file list through the API. It never
+checks out or runs PR code. The tests job runs the PR's code with a read-only
+token and no secrets, and loads the task, its scope and its check command from
+the PR's base commit, so a PR can't loosen its own rules. A PR that edits the
+workflow can change what its own tests job does. That's why `.github/` is
+protected: the scope job, which a PR can't touch, fails it.
+
+**Commands** (first line of an issue comment; bots are ignored):
+
+| Command | Who | Effect |
+| --- | --- | --- |
+| `/claim` | Anyone | Claim this issue's task (subject to readiness and fences) |
+| `/unclaim` | The claimer, or a maintainer | Release it, no penalty |
+| `/trust [@user]` | Anyone | Reply with a trust record |
+| `/help` | Anyone | List commands |
+| `/release` | Maintainer | Release someone's claim, no penalty |
+| `/reopen <note>` | Maintainer | Reopen with a note; the claimer loses trust |
+| `/flag @user <reason>` | Maintainer | Flag: −50 and their open work is pulled back |
+| `/ban @user <reason>`, `/unban @user` | Maintainer | Block or unblock claims |
+
+Maintainers are commenters whose GitHub `author_association` is `OWNER`,
+`MEMBER` or `COLLABORATOR`.
+
+**Races.** Every bookkeeping change starts from a fresh fetch of the default
+branch. If the push is rejected because someone else pushed first, the bot
+starts over from their version (up to 5 tries). When two people `/claim` the
+same task at once, the second sees the first's claim and is told no.
+
+In GitHub mode, `scope_violation` is recorded once per PR (with its `pr`
+number), and `accepted` events carry the `pr` that finished the task.
+`failed_submit` is not used: failing tests just keep a PR from being merged.
 
 ## Packets
 

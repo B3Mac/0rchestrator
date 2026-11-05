@@ -5,6 +5,13 @@ name: {{name}}
 # private: volunteers only get sealed, redacted task packets ("0rch pack").
 visibility: {{visibility}}
 
+# local: everyone works in one checkout, or sends forks/packets to the owner.
+# github: tasks become issues, volunteers /claim and open PRs (see "0rch init --github").
+workflow: {{workflow}}
+
+# Command run before checks in a fresh checkout (GitHub mode), e.g. npm ci.
+setup: {{setup}}
+
 goal: GOAL.md
 roadmap: ROADMAP.md
 tasks_dir: tasks
@@ -20,7 +27,7 @@ reward_unit: credits
 # A task can override this with its own "verify:" command.
 task_types:
   code:
-    verify: npm test
+    verify: {{verify}}
   docs:
     verify: null   # no automatic check; a reviewer reads it
 

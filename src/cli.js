@@ -5,7 +5,6 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { OrchError } from './errors.js';
 import { loadProject } from './project.js';
-import { initProject } from './init.js';
 import {
   loadTasks, getTask, computeReadiness, createTask,
 } from './tasks.js';
@@ -14,13 +13,12 @@ import { handoffPrompt, conductorPrompt, reviewPrompt } from './prompt.js';
 import {
   resolvePlayer, claimTask, unclaimTask, play, claimableTasks, submitTask, acceptTask, reopenTask,
   releaseExpired, flagPlayer, banPlayer, unbanPlayer, listPlayers, collectFork, checkTask,
+  guardGithubMode, pullRequestHint,
 } from './ops.js';
 import { statsFor, isFlagged } from './trust.js';
 import { packTask, unpackTask } from './packet.js';
 
-const VERSION = JSON.parse(
-  fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
-).version;
+import { initProject, VERSION } from './init.js';
 
 // ---- tiny output helpers ---------------------------------------------------
 
@@ -60,13 +58,42 @@ function command(name, { args = '', summary, options = {}, run, group = 'Volunte
 
 command('init', {
   group: 'Project owners',
-  summary: 'Set up 0rchestrator in this folder',
-  options: { name: { type: 'string' }, private: { type: 'boolean' } },
+  summary: 'Set up 0rchestrator here (--github: tasks become issues, volunteers send PRs)',
+  options: { name: { type: 'string' }, private: { type: 'boolean' }, github: { type: 'boolean' }, branch: { type: 'string' } },
   run({ values }) {
-    const res = initProject(values.root || process.cwd(), { name: values.name, isPrivate: values.private });
+    if (values.github && values.private) throw new OrchError('Private projects use packets, not public issues. Pick --github or --private.', 'USAGE');
+    const res = initProject(values.root || process.cwd(), { name: values.name, isPrivate: values.private, github: values.github, branch: values.branch });
     res.created.forEach((f) => out(`${c.green('created')}  ${f}`));
+    res.updated.forEach((f) => out(`${c.yellow('updated')}  ${f}`));
     res.skipped.forEach((f) => out(`${c.dim('exists')}   ${f}`));
-    out(`\nNext: write GOAL.md, then run ${c.bold('0rch plan')} and give that prompt to your conductor agent.`);
+    if (!values.github) {
+      out(`\nNext: write GOAL.md, then run ${c.bold('0rch plan')} and give that prompt to your conductor agent.`);
+      return;
+    }
+    out(`\n${c.bold('Next steps')}`);
+    out(`1. Write GOAL.md and check the "setup" and "verify" commands in 0rchestrator.yml.`);
+    out(`2. Plan tasks: ${c.bold('0rch plan')}, then give that prompt to your conductor agent (it runs "0rch new ...").`);
+    out(`3. ${c.bold('0rch doctor')} to check everything, then commit and push. Each task becomes an issue.`);
+    out(`4. Add this badge to your README so volunteers can find the tasks:\n\n${res.badge}\n`);
+    out(`Full guide: https://github.com/B3Mac/0rchestrator/blob/main/docs/GETTING-STARTED.md`);
+  },
+});
+
+command('doctor', {
+  group: 'Project owners',
+  summary: 'Check this project is ready for volunteers',
+  async run({ values }) {
+    const { doctor } = await import('./doctor.js');
+    const results = doctor(values.root || process.cwd());
+    const mark = { ok: c.green('ok   '), warn: c.yellow('warn '), error: c.red('error') };
+    results.forEach((r) => out(`${mark[r.level]} ${r.msg}`));
+    const errors = results.filter((r) => r.level === 'error').length;
+    const warns = results.filter((r) => r.level === 'warn').length;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    if (errors) out(`\n${c.red(`${plural(errors, 'problem')} to fix`)}${warns ? `, ${plural(warns, 'warning')}` : ''}.`);
+    else if (warns) out(`\n${c.yellow(`No blockers; ${plural(warns, 'warning')} worth a look.`)}`);
+    else out(`\n${c.green('Ready for volunteers.')}`);
+    return errors ? 1 : 0;
   },
 });
 
@@ -123,6 +150,7 @@ command('play', {
   summary: 'Claim the next task you can take and print its handoff',
   options: { as: { type: 'string' } },
   run({ project, values }) {
+    guardGithubMode(project, 'play');
     const player = resolvePlayer(project, values.as);
     const task = play(project, player);
     if (!task) {
@@ -140,6 +168,7 @@ command('claim', {
   summary: 'Claim a specific task',
   options: { as: { type: 'string' }, force: { type: 'boolean' } },
   run({ project, values, positionals: [id] }) {
+    guardGithubMode(project, 'claim');
     const player = resolvePlayer(project, values.as);
     const task = claimTask(project, need(id, 'task id'), player, { force: values.force });
     out(`${c.green('Claimed')} ${task.meta.id} for ${player}. Run "0rch prompt ${task.meta.id}" for the handoff.`);
@@ -151,6 +180,7 @@ command('unclaim', {
   summary: 'Give a task back so someone else can take it',
   options: { as: { type: 'string' } },
   run({ project, values, positionals: [id] }) {
+    guardGithubMode(project, 'unclaim');
     const task = unclaimTask(project, need(id, 'task id'), { player: values.as });
     out(`Released ${task.meta.id}. It's open again.`);
   },
@@ -167,8 +197,11 @@ command('prompt', {
 command('verify', {
   args: '<id>',
   summary: 'Check your work (scope + tests). Free, run it often',
-  run({ project, positionals: [id] }) {
-    const task = getTask(project, need(id, 'task id'));
+  options: { base: { type: 'string' } },
+  run({ project, values, positionals: [id] }) {
+    const found = getTask(project, need(id, 'task id'));
+    // --base: compare against a branch or commit (e.g. upstream/main) instead of where the claim started.
+    const task = values.base ? { ...found, meta: { ...found.meta, base: values.base } } : found;
     const res = checkTask(project, task);
     out(colorVerify(describeVerify(res)));
     return res.passed ? 0 : 2;
@@ -180,6 +213,13 @@ command('submit', {
   summary: 'Verify and hand in your work for review',
   options: { as: { type: 'string' } },
   run({ project, values, positionals: [id] }) {
+    if (project.config.workflow === 'github') {
+      const t = getTask(project, need(id, 'task id'));
+      const res = checkTask(project, t);
+      out(colorVerify(describeVerify(res)));
+      out(res.passed ? `\n${pullRequestHint(t)}` : `\n${c.red('Not ready.')} Fix the issues above first.`);
+      return res.passed ? 0 : 2;
+    }
     const { task, result } = submitTask(project, need(id, 'task id'), { player: values.as });
     out(colorVerify(describeVerify(result)));
     if (result.passed) out(`\n${c.green('Submitted')} ${task.meta.id} for review. Thanks for playing!`);
@@ -373,6 +413,51 @@ command('unban', {
   },
 });
 
+command('gh-event', {
+  group: 'GitHub Actions',
+  summary: 'Handle the current Actions event (used by the 0rchestrator workflow)',
+  async run({ values }) {
+    const { handleEvent } = await import('./github.js');
+    const { githubClient } = await import('./github-api.js');
+    const { findRoot } = await import('./project.js');
+    const eventName = process.env.GITHUB_EVENT_NAME;
+    const file = process.env.GITHUB_EVENT_PATH;
+    if (!eventName || !file) throw new OrchError('Run this inside GitHub Actions (GITHUB_EVENT_NAME and GITHUB_EVENT_PATH are not set).', 'USAGE');
+    const root = findRoot(values.root || process.cwd());
+    if (!root) throw new OrchError('No 0rchestrator.yml in this repo. Run "0rch init --github" first.', 'NO_PROJECT');
+    const res = await handleEvent({
+      root, eventName, payload: JSON.parse(fs.readFileSync(file, 'utf8')), api: githubClient(), log: (m) => process.stderr.write(`${m}\n`),
+    });
+    out(res.summary);
+    writeStepSummary(res.summary);
+    return res.exitCode;
+  },
+});
+
+command('check-pr', {
+  group: 'GitHub Actions',
+  summary: "Run a task PR's checks with the base commit's rules (sandboxed tests job)",
+  options: { base: { type: 'string' }, head: { type: 'string' }, title: { type: 'string' }, branch: { type: 'string' }, author: { type: 'string' } },
+  async run({ values }) {
+    const { checkPrTests } = await import('./github.js');
+    const { findRoot } = await import('./project.js');
+    const pr = process.env.GITHUB_EVENT_PATH ? JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')).pull_request ?? {} : {};
+    const root = findRoot(values.root || process.cwd());
+    if (!root) throw new OrchError('No 0rchestrator.yml here.', 'NO_PROJECT');
+    const res = checkPrTests({
+      root,
+      base: values.base ?? pr.base?.sha,
+      head: values.head ?? 'HEAD',
+      title: values.title ?? pr.title,
+      branch: values.branch ?? pr.head?.ref,
+      author: values.author ?? pr.user?.login,
+    });
+    out(res.summary);
+    writeStepSummary(res.summary);
+    return res.exitCode;
+  },
+});
+
 command('mcp', {
   group: 'Agents',
   summary: 'Run the MCP server so Claude Code, Codex and others can play directly',
@@ -388,6 +473,11 @@ command('mcp', {
 function need(v, what) {
   if (v === undefined || v === null || String(v).trim() === '') throw new OrchError(`Missing ${what}.`, 'USAGE');
   return v;
+}
+
+function writeStepSummary(md) {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (file) fs.appendFileSync(file, `${md}\n`);
 }
 
 function colorVerify(text) {
@@ -435,7 +525,8 @@ export async function main(argv = process.argv.slice(2)) {
       allowPositionals: true,
       strict: true,
     });
-    const project = name === 'init' || name === 'mcp' ? null : loadProject(values.root || process.cwd());
+    const standalone = ['init', 'mcp', 'doctor', 'gh-event', 'check-pr'];
+    const project = standalone.includes(name) ? null : loadProject(values.root || process.cwd());
     const code = await cmd.run({ project, values, positionals });
     return code ?? 0;
   } catch (err) {
