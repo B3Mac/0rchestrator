@@ -13,6 +13,13 @@ export const DEFAULTS = {
   goal: 'GOAL.md',
   roadmap: 'ROADMAP.md',
   tasks_dir: 'tasks',
+  // local: one checkout, packets or forks. github: tasks are issues, volunteers /claim and open PRs.
+  workflow: 'local',
+  // Command run before checks in a fresh checkout (GitHub mode), e.g. "npm ci".
+  setup: null,
+  github: {
+    label: '0rchestrator',
+  },
   claim_timeout_hours: 48,
   verify_timeout_seconds: 600,
   reward_unit: 'credits',
@@ -34,6 +41,7 @@ export const DEFAULTS = {
       medium: { min_score: 40, min_accepted: 1 },
       large: { min_score: 60, min_accepted: 3 },
       sensitive: { min_score: 80, min_accepted: 5 },
+      verify: { min_score: 70, min_accepted: 3 },   // may /verified someone else's PR
     },
   },
   private: {
@@ -93,6 +101,9 @@ export function loadProject(start = process.cwd()) {
   if (!['public', 'private'].includes(config.visibility)) {
     throw new OrchError(`visibility must be "public" or "private" (got "${config.visibility}").`, 'BAD_CONFIG');
   }
+  if (!['local', 'github'].includes(config.workflow)) {
+    throw new OrchError(`workflow must be "local" or "github" (got "${config.workflow}").`, 'BAD_CONFIG');
+  }
   if (!isPlainObject(config.task_types) || Object.keys(config.task_types).length === 0) {
     throw new OrchError('task_types must define at least one task type.', 'BAD_CONFIG');
   }
@@ -110,6 +121,15 @@ export function loadProject(start = process.cwd()) {
 /** Relative paths that only the conductor and CLI may change. */
 export function bookkeepingPaths(project) {
   return [normalizeDir(project.config.tasks_dir), STATE_DIR + '/'];
+}
+
+/** Paths a volunteer's pull request may never touch, whatever its scope says. */
+export function protectedPaths(project) {
+  return [...bookkeepingPaths(project), CONFIG_FILE, '.github/'];
+}
+
+export function isProtected(project, rel) {
+  return protectedPaths(project).some((p) => (p.endsWith('/') ? rel.startsWith(p) : rel === p));
 }
 
 function normalizeDir(p) {

@@ -7,6 +7,7 @@ import { claimTask, intake } from './ops.js';
 import { handoffPrompt, handoffFiles } from './prompt.js';
 import { Redactor } from './redact.js';
 import { playerKey } from './trust.js';
+import { isGitRepo, showFile } from './git.js';
 
 // A task packet is a folder a volunteer can work on without the repo:
 //   HANDOFF.md    the prompt for their AI (redacted)
@@ -104,15 +105,18 @@ export function unpackTask(project, id, dir, { player, now = new Date() } = {}) 
 
   const redactor = loadRedactor(project, task.meta.id);
   const filesDir = path.join(dir, 'files');
+  // The files as they were when the packet was made, for a three-way merge.
+  const startedFrom = (rel) => (task.meta.base && isGitRepo(project.root) ? showFile(project.root, task.meta.base, rel) : undefined);
   const present = walk(filesDir);
   const changes = [];
   for (const rel of present) {
     const buf = fs.readFileSync(path.join(filesDir, rel));
     if (manifest.files[rel] === sha(buf)) continue;
-    changes.push({ rel: redactor.restore(rel), content: Buffer.from(redactor.restore(buf.toString('utf8'))) });
+    const real = redactor.restore(rel);
+    changes.push({ rel: real, content: Buffer.from(redactor.restore(buf.toString('utf8'))), base: startedFrom(real) });
   }
   for (const rel of Object.keys(manifest.files)) {
-    if (!present.includes(rel)) changes.push({ rel: redactor.restore(rel), content: null });
+    if (!present.includes(rel)) changes.push({ rel: redactor.restore(rel), content: null, base: startedFrom(redactor.restore(rel)) });
   }
   for (const c of changes) {
     if (c.rel.split('/').includes('..') || path.isAbsolute(c.rel)) {

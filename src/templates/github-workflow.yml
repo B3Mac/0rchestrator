@@ -1,0 +1,81 @@
+# 0rchestrator: lets volunteers lend their AI agents to this repo.
+# https://github.com/B3Mac/0rchestrator/blob/main/docs/GETTING-STARTED.md
+#
+# Tasks in {{tasks_dir}}/ become issues labeled "{{label}}". A volunteer comments
+# /claim, does the task in their fork, and opens a PR titled "T-0001: ...".
+# Two checks run on that PR:
+#   scope  trusted: reads the PR's file list from the API, never runs PR code
+#   tests  sandboxed: runs the PR's code with a read-only token and no secrets
+# Merging the PR credits the volunteer and closes the task's issue.
+name: 0rchestrator
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, closed]
+  push:
+    branches: [{{branch}}]
+    paths: ['{{tasks_dir}}/**', '0rchestrator.yml']
+  schedule:
+    - cron: '17 */6 * * *'   # release claims that expired with no PR
+  workflow_dispatch:
+
+env:
+  ORCH: github:B3Mac/0rchestrator#v{{version}}
+
+jobs:
+  scope:
+    if: github.event_name == 'pull_request_target' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # records out-of-scope work in the trust ledger
+      issues: write
+      pull-requests: write
+    steps:
+      # Checks out the base branch, not the PR. Do not add a "ref:" here.
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npx --yes --package="$ORCH" -- 0rch gh-event
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      # Add any other toolchains your checks need here (setup-python, etc.).
+      - run: npx --yes --package="$ORCH" -- 0rch check-pr
+
+  bookkeeping:
+    if: >-
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/')) ||
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' && github.event.action == 'closed' && github.event.pull_request.merged)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # claims, merges and moderation update {{tasks_dir}}/ and the ledger
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npx --yes --package="$ORCH" -- 0rch gh-event
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

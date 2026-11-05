@@ -2,20 +2,44 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { OrchError } from './errors.js';
 import { STATE_DIR } from './project.js';
 import {
-  loadTasks, getTask, saveTask, computeReadiness, addNote, clearClaim, ACTIVE,
+  loadTasks, getTask, saveTask, readinessFor, addNote, addAttempt, clearClaim, ACTIVE,
 } from './tasks.js';
 import {
   appendEvent, playerStats, statsFor, canClaim, playerKey,
 } from './trust.js';
-import { verifyTask } from './verify.js';
+import { verifyTask, symbolProblems } from './verify.js';
 import {
   headSha, gitUserName, isGitRepo, commitPaths, changedFiles, fetchRef, diffNames, showFile,
 } from './git.js';
 import { matchesScope } from './scope.js';
 import { bookkeepingPaths } from './project.js';
+
+/**
+ * In GitHub mode the default branch is the source of truth: claims happen with
+ * /claim on the task's issue and work arrives as a pull request. Local claim
+ * commands would only change the volunteer's own copy, so they explain that.
+ */
+export function guardGithubMode(project, action) {
+  if (project.config.workflow !== 'github') return;
+  const tasks = loadTasks(project);
+  const readiness = readinessFor(project, tasks);
+  const ready = tasks.filter((t) => readiness.get(t.meta.id).ready).map((t) => t.meta.id);
+  const where = action === 'unclaim' ? 'comment `/unclaim` on the task\'s GitHub issue' : 'comment `/claim` on the task\'s GitHub issue';
+  throw new OrchError(
+    `This project uses GitHub mode, so ${action === 'unclaim' ? 'give tasks back' : 'claims happen'} on GitHub: ${where}.${action !== 'unclaim' && ready.length ? ` Ready now: ${ready.join(', ')}.` : ''}`,
+    'GITHUB_MODE',
+  );
+}
+
+/** What to tell a GitHub-mode volunteer whose work passes verify. */
+export function pullRequestHint(task) {
+  const title = `${task.meta.id}: ${task.meta.title}`;
+  return `Looks good. Push your branch and open a pull request titled "${title}":\n  gh pr create --title ${JSON.stringify(title)}`;
+}
 
 /** Who is acting: --as, then $ORCH_VOLUNTEER, then git user.name, then the OS user. */
 export function resolvePlayer(project, given) {
@@ -28,12 +52,12 @@ function samePlayer(a, b) {
   return playerKey(a) === playerKey(b);
 }
 
-/** Return claims older than the timeout to the pool. */
-export function releaseExpired(project, { now = new Date() } = {}) {
+/** Return claims older than the timeout to the pool (except task ids in `keep`, e.g. ones with an open PR). */
+export function releaseExpired(project, { now = new Date(), keep = new Set() } = {}) {
   const hours = project.config.claim_timeout_hours;
   const released = [];
   for (const task of loadTasks(project)) {
-    if (task.meta.status !== 'claimed' || !task.meta.claimed_at) continue;
+    if (task.meta.status !== 'claimed' || !task.meta.claimed_at || keep.has(task.meta.id)) continue;
     const age = (now - new Date(task.meta.claimed_at)) / 36e5;
     if (age < hours) continue;
     const player = task.meta.claimed_by;
@@ -50,7 +74,7 @@ export function releaseExpired(project, { now = new Date() } = {}) {
 /** Ready tasks this player is allowed to take, in id order. */
 export function claimableTasks(project, player) {
   const tasks = loadTasks(project);
-  const ready = computeReadiness(tasks);
+  const ready = readinessFor(project, tasks);
   const stats = statsFor(project, player);
   return tasks.filter((t) => ready.get(t.meta.id).ready && canClaim(stats, t, project.config.trust).ok);
 }
@@ -62,7 +86,7 @@ export function claimTask(project, id, player, { now = new Date(), force = false
     const who = task.meta.claimed_by ? ` by ${task.meta.claimed_by}` : '';
     throw new OrchError(`${task.meta.id} is ${task.meta.status}${who}, so it can't be claimed.`, 'NOT_OPEN');
   }
-  const ready = computeReadiness(tasks).get(task.meta.id);
+  const ready = readinessFor(project, tasks).get(task.meta.id);
   if (!ready.ready && !force) {
     throw new OrchError(`${task.meta.id} isn't ready: ${ready.reasons.join('; ')}.`, 'NOT_READY');
   }
@@ -86,7 +110,7 @@ export function play(project, player, { now = new Date() } = {}) {
   return next ? claimTask(project, next.meta.id, player, { now }) : null;
 }
 
-export function unclaimTask(project, id, { player, now = new Date() } = {}) {
+export function unclaimTask(project, id, { player, note, now = new Date() } = {}) {
   const task = getTask(project, id);
   if (task.meta.status !== 'claimed') throw new OrchError(`${task.meta.id} is ${task.meta.status}, not claimed.`, 'NOT_CLAIMED');
   if (player && !samePlayer(player, task.meta.claimed_by)) {
@@ -95,8 +119,21 @@ export function unclaimTask(project, id, { player, now = new Date() } = {}) {
   const was = task.meta.claimed_by;
   task.meta.status = 'open';
   clearClaim(task.meta);
+  if (note) addAttempt(task, note, was, now);
   saveTask(task);
   appendEvent(project, { type: 'released', player: was, task: task.meta.id }, now);
+  return task;
+}
+
+/**
+ * Leave notes for the next person: how close you got, a decomp.me link, what
+ * didn't work. They're in every future handoff, so nobody repeats a dead end.
+ */
+export function noteTask(project, id, { note, by, now = new Date() } = {}) {
+  if (!note || !String(note).trim()) throw new OrchError('Say what to note, e.g. "92% match, stuck on the loop: https://decomp.me/scratch/abc".', 'USAGE');
+  const task = getTask(project, id);
+  addAttempt(task, note, by, now);
+  saveTask(task);
   return task;
 }
 
@@ -152,13 +189,13 @@ export function checkTask(project, task) {
  * Verify and hand in a claimed task. Passing work moves to review.
  * A scope violation or failing check costs trust score and leaves the task claimed.
  */
-export function submitTask(project, id, { player, now = new Date(), changed = null } = {}) {
+export function submitTask(project, id, { player, now = new Date(), changed = null, symbols = true } = {}) {
   const task = getTask(project, id);
   if (task.meta.status !== 'claimed') throw new OrchError(`${task.meta.id} is ${task.meta.status}; only claimed tasks can be submitted.`, 'NOT_CLAIMED');
   if (player && !samePlayer(player, task.meta.claimed_by)) {
     throw new OrchError(`${task.meta.id} is claimed by ${task.meta.claimed_by}, not ${player}.`, 'NOT_YOURS');
   }
-  const result = verifyTask(project, task, { changed, exempt: changed ? () => false : othersSubmittedWork(project, task) });
+  const result = verifyTask(project, task, { changed, symbols, exempt: changed ? () => false : othersSubmittedWork(project, task) });
   const who = task.meta.claimed_by;
   if (result.scope.checked && result.scope.outside.length) {
     appendEvent(project, { type: 'scope_violation', player: who, task: task.meta.id, files: result.scope.outside }, now);
@@ -298,40 +335,81 @@ export function revertFiles(root, backup) {
 }
 
 /**
- * Shared path for outside work: check scope on the incoming change set, apply
- * it, run the checks, and undo it if the checks fail.
+ * Three-way merge one file: `ours` (what's on disk now), `base` (what the
+ * volunteer started from) and `theirs` (what they sent). Returns the merged
+ * bytes, or null on a conflict. Lets several people finish different
+ * functions of one file without overwriting each other.
+ */
+export function mergeFile(ours, base, theirs) {
+  if (base === undefined) return theirs;
+  const eq = (a, b) => (a === null ? b === null : b !== null && a.equals(b));
+  if (eq(ours, base)) return theirs;
+  if (eq(ours, theirs) || eq(base, theirs)) return ours;
+  if (ours === null || base === null || theirs === null) return null;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), '0rch-merge-'));
+  const [o, b, t] = ['ours', 'base', 'theirs'].map((n) => path.join(dir, n));
+  fs.writeFileSync(o, ours);
+  fs.writeFileSync(b, base);
+  fs.writeFileSync(t, theirs);
+  try {
+    return execFileSync('git', ['merge-file', '-p', '-q', o, b, t], { stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return null;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Shared path for outside work (a fork or a returned packet). `changes` is
+ * [{ rel, content, base }]: the file as sent, and as it was when the volunteer
+ * started (undefined if unknown). Checks scope, merges onto the current
+ * files, runs the checks, and puts everything back if they fail.
  */
 export function intake(project, task, changes, { now = new Date() } = {}) {
   const ignored = bookkeepingPaths(project);
   const relevant = changes.filter((c) => !ignored.some((d) => c.rel.startsWith(d)));
   const outside = relevant.filter((c) => !matchesScope(c.rel, task.meta.scope)).map((c) => c.rel);
+  const disk = (rel) => {
+    const full = path.join(project.root, rel);
+    return fs.existsSync(full) ? fs.readFileSync(full) : null;
+  };
+  const text = (b) => (b === null || b === undefined ? b : b.toString('utf8'));
+  const byRel = new Map(relevant.map((c) => [c.rel, c]));
+  const symbol = symbolProblems(task.meta.scope, relevant.map((c) => c.rel).filter((r) => matchesScope(r, task.meta.scope)), (rel) => {
+    const c = byRel.get(rel);
+    return { before: text(c.base === undefined ? disk(rel) : c.base), after: text(c.content) };
+  });
   const player = task.meta.claimed_by;
+  const fail = (scope, reason) => ({
+    task,
+    applied: false,
+    result: { task: task.meta.id, passed: false, scope: { checked: true, changed: relevant.map((c) => c.rel), inside: [], outside: [], symbol: [], empty: false, passed: false, ...scope }, command: { ran: false, passed: false, reason } },
+  });
 
-  if (outside.length) {
-    appendEvent(project, { type: 'scope_violation', player, task: task.meta.id, files: outside }, now);
-    return {
-      task,
-      applied: false,
-      result: { task: task.meta.id, passed: false, scope: { checked: true, changed: relevant.map((c) => c.rel), inside: [], outside, empty: false, passed: false }, command: { ran: false, passed: false, reason: 'Not run: the work changed files outside its scope.' } },
-    };
+  if (outside.length || symbol.length) {
+    appendEvent(project, { type: 'scope_violation', player, task: task.meta.id, files: [...outside, ...symbol.map((p) => p.file)] }, now);
+    return fail({ outside, symbol }, 'Not run: the work changed things outside its scope.');
   }
   if (!relevant.length) {
     appendEvent(project, { type: 'failed_submit', player, task: task.meta.id }, now);
-    return {
-      task,
-      applied: false,
-      result: { task: task.meta.id, passed: false, scope: { checked: true, changed: [], inside: [], outside: [], empty: true, passed: false }, command: { ran: false, passed: false, reason: 'Not run: nothing changed.' } },
-    };
+    return fail({ empty: true }, 'Not run: nothing changed.');
   }
   if (isGitRepo(project.root)) {
-    const dirty = changedFiles(project.root, null).filter((f) => relevant.some((c) => c.rel === f));
+    const dirty = changedFiles(project.root, null).filter((f) => byRel.has(f));
     if (dirty.length) {
       throw new OrchError(`You have uncommitted changes to ${dirty.join(', ')}. Commit or stash them first.`, 'DIRTY');
     }
   }
+  const merged = relevant.map((c) => ({ rel: c.rel, content: mergeFile(disk(c.rel), c.base, c.content) }));
+  const conflicts = merged.filter((m, i) => m.content === null && relevant[i].content !== null).map((m) => m.rel);
+  if (conflicts.length) {
+    // Not the volunteer's fault: the file moved on since they started. No penalty.
+    return fail({ conflicts }, `Not applied: ${conflicts.join(', ')} changed since this work started and the changes overlap. The volunteer should update their copy and send it again.`);
+  }
 
-  const backup = applyFiles(project.root, relevant);
-  const out = submitTask(project, task.meta.id, { now, changed: relevant.map((c) => c.rel) });
+  const backup = applyFiles(project.root, merged);
+  const out = submitTask(project, task.meta.id, { now, changed: merged.map((c) => c.rel), symbols: false });
   if (!out.result.passed) revertFiles(project.root, backup);
   return { ...out, applied: out.result.passed };
 }
@@ -365,8 +443,9 @@ export function collectFork(project, id, url, { ref = 'HEAD', player, now = new 
   const base = task.meta.base || headSha(project.root);
   // Three-dot: only what the fork changed since it split off, not what main did since.
   const names = diffNames(project.root, `${base}...${fetched}`);
+  const mergeBase = execFileSync('git', ['merge-base', base, fetched], { cwd: project.root, encoding: 'utf8' }).trim();
   const changes = names
-    .map((rel) => ({ rel, content: showFile(project.root, fetched, rel) }))
+    .map((rel) => ({ rel, content: showFile(project.root, fetched, rel), base: showFile(project.root, mergeBase, rel) }))
     // A fork that is behind may "change" files to what main already has: not a real change.
     .filter(({ rel, content }) => {
       const full = path.join(project.root, rel);

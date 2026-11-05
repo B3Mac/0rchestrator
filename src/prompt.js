@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadTasks, computeReadiness, nextId } from './tasks.js';
-import { matchesScope } from './scope.js';
+import { loadTasks, readinessFor, nextId } from './tasks.js';
+import { matchesScope, scopeSymbols, splitScope } from './scope.js';
 import { trackedFiles, diffAgainst, isUntracked } from './git.js';
 import { verifyCommandFor, describeVerify } from './verify.js';
 import { statsFor } from './trust.js';
@@ -19,7 +19,7 @@ function readIfExists(file) {
   }
 }
 
-function fence(text) {
+export function fence(text) {
   const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
   return '`'.repeat(longest + 1);
 }
@@ -106,14 +106,26 @@ function goalText(project) {
  * The ready-to-paste prompt a volunteer gives their AI.
  * mode "repo": they have the repo checked out. mode "packet": they only have a sealed packet folder.
  */
-export function handoffPrompt(project, task, { mode = 'repo', redactor = null } = {}) {
+export function handoffPrompt(project, task, { mode = 'repo', redactor = null, files: withFiles = true } = {}) {
   const m = task.meta;
   const cmd = verifyCommandFor(project, task);
   const scope = m.scope.length ? m.scope.map((s) => `- \`${s}\``).join('\n') : '- _(nothing: this task should not change any files)_';
   const files = handoffFiles(project, task);
 
-  const finish =
-    mode === 'packet'
+  const github = mode === 'repo' && project.config.workflow === 'github';
+  const finish = mode === 'runner'
+    ? [
+        '- Your reply is applied and checked automatically. If the checks fail, you will see their output and can try again.',
+        '- Each reply must contain all of your changes, starting from the files as shown below (not from your previous attempt).',
+      ]
+    : github
+    ? [
+        `- Work on a new branch in your fork. Never change \`${project.config.tasks_dir}/\`, \`.0rchestrator/\`, \`.github/\` or \`0rchestrator.yml\`.`,
+        `- Run \`0rch verify ${m.id}\` until it passes. It checks that you stayed in scope${cmd ? ` and runs \`${cmd}\`` : ''}.`,
+        `- Open a pull request titled \`${m.id}: ${m.title}\`. Its checks run automatically and a maintainer merges it.`,
+        `- If the task is wrong or you are stuck, stop and explain why, then comment \`/unclaim\` on the task's issue.`,
+      ]
+    : mode === 'packet'
       ? [
           `- Work only inside the \`files/\` folder of this packet, and only on the scope paths above (you may add new files that match them).`,
           '- The owner runs the checks privately when the packet comes back, so make sure the acceptance criteria are met.',
@@ -140,7 +152,9 @@ export function handoffPrompt(project, task, { mode = 'repo', redactor = null } 
     '',
     '## Rules',
     '',
-    'You may only create, change or delete these paths:',
+    scopeSymbols(m.scope).length
+      ? `You may only change these paths. An entry like \`file.c#Name\` means: in that file, change only the function \`Name\` (its \`INCLUDE_ASM\` stub or its C code), and leave every other line exactly as it is.`
+      : 'You may only create, change or delete these paths:',
     '',
     scope,
     '',
@@ -148,17 +162,18 @@ export function handoffPrompt(project, task, { mode = 'repo', redactor = null } 
     '- Do not add new dependencies unless the task says to.',
     ...finish,
     '',
-    '## Files',
-    '',
-    files.length ? fileBlocks(project, files) : '_No context files listed._',
+    ...(mode === 'runner' ? [] : ['## Files', '']),
+    mode === 'runner' ? '' : !withFiles
+      ? `_File contents left out here. In your clone, \`0rch prompt ${m.id}\` prints them: ${files.map((f) => `\`${f}\``).join(', ') || 'none listed'}._`
+      : files.length ? fileBlocks(project, files) : '_No context files listed._',
     '',
   ].join('\n');
   // Redact the finished prompt in one pass so names, paths and file text all match the packet.
   return redactor ? redactor.redact(text) : text;
 }
 
-function statusTable(tasks) {
-  const ready = computeReadiness(tasks);
+function statusTable(project, tasks) {
+  const ready = readinessFor(project, tasks);
   if (!tasks.length) return '_No tasks yet._';
   const rows = tasks.map((t) => {
     const why = t.meta.status === 'open' ? (ready.get(t.meta.id).ready ? 'ready' : ready.get(t.meta.id).reasons.join('; ')) : '';
@@ -193,7 +208,7 @@ export function conductorPrompt(project, { batch = 5 } = {}) {
     '',
     '## Current tasks',
     '',
-    statusTable(tasks),
+    statusTable(project, tasks),
     '',
     '## Files in the project',
     '',

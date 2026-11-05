@@ -1,0 +1,3 @@
+# 0rchestrator: private keys and packets never leave this machine
+.0rchestrator/redactions/
+.0rchestrator/packets/
