@@ -8,18 +8,21 @@ import {
   loadProject, CONFIG_FILE, STATE_DIR, LEDGER_FILE, isProtected,
 } from './project.js';
 import {
-  loadTasks, getTask, normalizeId, saveTask, computeReadiness, ACTIVE,
+  loadTasks, getTask, normalizeId, saveTask, readinessFor, addAttempt, ACTIVE,
 } from './tasks.js';
 import {
-  claimTask, unclaimTask, reopenTask, flagPlayer, banPlayer, unbanPlayer, releaseExpired,
+  claimTask, unclaimTask, reopenTask, flagPlayer, banPlayer, unbanPlayer, releaseExpired, noteTask,
 } from './ops.js';
 import {
-  statsFor, appendEvent, readLedger, canClaim, playerKey,
+  statsFor, appendEvent, readLedger, canClaim, canVerify, playerKey,
 } from './trust.js';
 import { matchesScope } from './scope.js';
 import { handoffPrompt, fence } from './prompt.js';
-import { verifyCommandFor, runCheck } from './verify.js';
+import {
+  verifyCommandFor, ciCommandFor, runCheck, taskEnv, symbolProblems,
+} from './verify.js';
 import { diffNames, showFile, filesAt } from './git.js';
+import { symbolsFor } from './scope.js';
 
 // GitHub mode. Three kinds of jobs call into this file from the workflow:
 //   trusted bookkeeping  (issue comments, merges, pushes, schedule): changes
@@ -47,7 +50,9 @@ export const HELP = [
   '**0rchestrator commands** (comment on a task issue)',
   '',
   '- `/claim`: take this task',
-  '- `/unclaim`: give it back, no penalty',
+  '- `/unclaim [note]`: give it back, no penalty. The note (how close you got, a decomp.me link) goes in the next person\'s handoff',
+  '- `/note <text>`: add to the task\'s notes for whoever works on it next (claimer or maintainers)',
+  '- `/verified` on a PR: you ran its full check locally and it passes (maintainers and trusted players)',
   '- `/trust` or `/trust @user`: a trust score and record',
   '',
   'Maintainers only:',
@@ -71,7 +76,7 @@ export function taskIdFrom(...texts) {
   return null;
 }
 
-const COMMANDS = new Set(['claim', 'unclaim', 'release', 'reopen', 'flag', 'ban', 'unban', 'trust', 'help']);
+const COMMANDS = new Set(['claim', 'unclaim', 'release', 'reopen', 'flag', 'ban', 'unban', 'trust', 'help', 'note', 'verified']);
 
 /** "/flag @mallory rewrote tests" → { name: 'flag', target: 'mallory', reason: 'rewrote tests' } */
 export function parseCommand(body) {
@@ -176,7 +181,22 @@ export function claimMessage(project, task, login) {
  * author, author still allowed by the fences, and every changed file inside
  * the task's scope and outside the protected paths. Pure: no I/O.
  */
-export function checkPullRequest(project, { id, author, files }) {
+/** Files whose task scope limits them to certain functions; those need their contents checked. */
+export function filesNeedingContents(project, id, files) {
+  let task;
+  try {
+    task = getTask(project, id);
+  } catch {
+    return [];
+  }
+  return files.filter((f) => !isProtected(project, f) && symbolsFor(f, task.meta.scope));
+}
+
+/**
+ * `contents` maps a file to { before, after } (text at the merge base and in
+ * the PR); needed only for files scoped to single functions.
+ */
+export function checkPullRequest(project, { id, author, files, contents = new Map() }) {
   const reasons = [];
   const scope = { inside: [], outside: [], protected: [], passed: false };
   let task = null;
@@ -198,10 +218,12 @@ export function checkPullRequest(project, { id, author, files }) {
     else if (matchesScope(f, m.scope)) scope.inside.push(f);
     else scope.outside.push(f);
   }
+  scope.symbol = symbolProblems(m.scope, scope.inside, (f) => contents.get(f));
   if (scope.protected.length) reasons.push(`Changes files no volunteer may touch: ${list(scope.protected)}.`);
   if (scope.outside.length) reasons.push(`Changes files outside the task's scope: ${list(scope.outside)}.`);
+  for (const p of scope.symbol) reasons.push(`${code(p.file)} ${p.reason}.`);
   if (!files.length) reasons.push('Changes no files.');
-  scope.passed = scope.inside.length > 0 && !scope.protected.length && !scope.outside.length;
+  scope.passed = scope.inside.length > 0 && !scope.protected.length && !scope.outside.length && !scope.symbol.length;
   return { ok: reasons.length === 0, id, author, task, reasons, scope };
 }
 
@@ -403,8 +425,32 @@ async function onComment(ctx, payload) {
       }
       case 'unclaim': {
         if (!(await needTask())) return;
-        await transact(ctx, `${id}: released by @${login}`, (p) => unclaimTask(p, id, { player: maintainer ? undefined : login, now: ctx.now }));
-        return reply(`${id} is open again. Thanks for trying, @${login}. Anyone can \`/claim\` it now.`);
+        const note = cmd.rest || null;
+        await transact(ctx, `${id}: released by @${login}`, (p) => unclaimTask(p, id, { player: maintainer ? undefined : login, note, now: ctx.now }));
+        return reply(`${id} is open again. Thanks for trying, @${login}.${note ? ' Your note is in the next person\'s handoff.' : ''} Anyone can \`/claim\` it now.`);
+      }
+      case 'note': {
+        if (!(await needTask())) return;
+        const task = getTask(loadProject(ctx.root), id);
+        if (!maintainer && playerKey(task.meta.claimed_by) !== playerKey(login)) {
+          return reply(`@${login} only the person who claimed ${id}, or a maintainer, can add notes.`);
+        }
+        if (!cmd.rest) return reply(`@${login} add the note after the command: \`/note 92% match, stuck on the loop: <decomp.me link>\`.`);
+        await transact(ctx, `${id}: note from @${login}`, (p) => noteTask(p, id, { note: cmd.rest, by: login, now: ctx.now }));
+        return reply(`Noted on ${id}. It's in the handoff for whoever works on it next.`);
+      }
+      case 'verified': {
+        if (!issue.pull_request || !id) return reply(`@${login} use \`/verified\` on a task's pull request, after running its full check (\`0rch pr ${issue.number}\`).`);
+        const project = loadProject(ctx.root);
+        const author = issue.user?.login;
+        if (author && playerKey(author) === playerKey(login)) return reply(`@${login} someone else has to verify your work.`);
+        const stats = statsFor(project, login);
+        if (!maintainer && !canVerify(stats, project.config.trust)) {
+          const f = project.config.trust.fences.verify ?? { min_score: 70, min_accepted: 3 };
+          return reply(`@${login} verifying needs trust ${f.min_score}+ and ${f.min_accepted} accepted tasks (you have ${stats.score} and ${stats.accepted}), or a maintainer.`);
+        }
+        await transact(ctx, `${id}: PR #${n} verified by @${login}`, (p) => appendEvent(p, { type: 'verified', player: login, task: id, pr: n, for: author ?? null, note: cmd.rest || null }, ctx.now));
+        return reply(`**Verified** by @${login} (trust ${stats.score}, ${stats.tier}): the full check for ${id} passes on their machine.${cmd.rest ? ` Note: ${cmd.rest}` : ''}`);
       }
       case 'release': {
         if (!(await needMaintainer()) || !(await needTask())) return;
@@ -474,14 +520,21 @@ async function onPullRequest(ctx, payload) {
   const author = pr.user.login;
   const files = await ctx.api.prFiles(pr.number);
   const project = loadProject(ctx.root);
-  const report = checkPullRequest(project, { id, author, files });
+  // Function-scoped files: compare their text at the merge base and in the PR (read via the API, never run).
+  const contents = new Map();
+  const needing = filesNeedingContents(project, id, files);
+  if (needing.length) {
+    const mergeBase = await ctx.api.mergeBase(pr.base.sha, pr.head.sha);
+    for (const f of needing) contents.set(f, { before: await ctx.api.fileAt(f, mergeBase), after: await ctx.api.fileAt(f, pr.head.sha) });
+  }
+  const report = checkPullRequest(project, { id, author, files, contents });
   // GitHub lists at most 3,000 files per PR; anything it can't list can't be checked.
   if (Number(pr.changed_files) > files.length) {
     report.ok = false;
     report.scope.passed = false;
     report.reasons.push(`Changes ${pr.changed_files} files, more than can be checked. Split it into smaller PRs.`);
   }
-  const bad = [...report.scope.protected, ...report.scope.outside];
+  const bad = [...report.scope.protected, ...report.scope.outside, ...(report.scope.symbol ?? []).map((p) => p.file)];
   const ownClaim = report.task && ACTIVE.includes(report.task.meta.status) && playerKey(report.task.meta.claimed_by) === playerKey(author);
   if (bad.length && ownClaim) {
     // Counts once per pull request, however many times it's pushed to.
@@ -521,7 +574,7 @@ async function onMerged(ctx, payload) {
   const s = statsFor(project, author);
   const task = getTask(project, id);
   const tasks = loadTasks(project);
-  const ready = computeReadiness(tasks);
+  const ready = readinessFor(project, tasks);
   const unlocked = tasks.filter((t) => t.meta.depends_on.includes(id) && ready.get(t.meta.id).ready).map((t) => t.meta.id);
   const reward = task.meta.reward ? ` and earned ${task.meta.reward} ${project.config.reward_unit}` : '';
   await say(ctx, pr.number, `**Accepted ${id}.** Thanks, @${author}! Your trust score is now ${s.score} (${s.tier})${reward}.${unlocked.length ? ` This unlocked ${unlocked.join(', ')}.` : ''}`);
@@ -634,14 +687,18 @@ export function checkPrTests({ root, base, head = 'HEAD', title, branch, author 
   if (!base) throw new OrchError('Need the base commit (--base) to compare against.', 'USAGE');
   const project = loadProjectAtRef(root, base);
   const files = diffNames(root, `${base}...${head}`);
-  const report = checkPullRequest(project, { id, author: author ?? 'unknown', files });
+  const mergeBase = execFileSync('git', ['merge-base', base, head], { cwd: root, encoding: 'utf8' }).trim();
+  const text = (ref, f) => showFile(root, ref, f)?.toString('utf8') ?? null;
+  const contents = new Map(filesNeedingContents(project, id, files).map((f) => [f, { before: text(mergeBase, f), after: text(head, f) }]));
+  const report = checkPullRequest(project, { id, author: author ?? 'unknown', files, contents });
   const lines = [`### 0rchestrator tests: ${id}`, ''];
   let passed = false;
   if (!report.task) {
     lines.push(`- **Problem:** ${report.reasons[0]}`);
   } else if (!report.scope.passed) {
-    lines.push('Tests were not run: this PR changes files outside its task\'s scope (see the **scope** check).');
+    lines.push('Tests were not run: this PR changes things outside its task\'s scope (see the **scope** check).');
     for (const f of [...report.scope.protected, ...report.scope.outside]) lines.push(`- ${code(f)}`);
+    for (const p of report.scope.symbol ?? []) lines.push(`- ${code(p.file)} ${p.reason}`);
   } else {
     const timeout = project.config.verify_timeout_seconds;
     let run = null;
@@ -651,12 +708,16 @@ export function checkPrTests({ root, base, head = 'HEAD', title, branch, author 
       if (!s.passed) run = s;
     }
     if (!run) {
-      const cmd = verifyCommandFor(project, report.task);
+      const ci = ciCommandFor(project, report.task);
+      const cmd = ci.cmd;
+      if (ci.localOnly) {
+        lines.push(`- The full check (${code(verifyCommandFor(project, report.task) ?? 'none set')}) needs files CI doesn't have, like the original game. A maintainer or trusted volunteer with them runs \`0rch pr <number>\` and comments \`/verified\`.`);
+      }
       if (!cmd) {
-        lines.push('- No automatic check for this task type. A maintainer reviews it.');
+        if (!ci.localOnly) lines.push('- No automatic check for this task type. A maintainer reviews it.');
         passed = true;
       } else {
-        run = runCheck(cmd, { cwd: root, timeoutSeconds: timeout, env: { ORCH_TASK: id } });
+        run = runCheck(cmd, { cwd: root, timeoutSeconds: timeout, env: taskEnv(report.task) });
         lines.push(`- Checks ${code(cmd)}: ${run.passed ? 'passed' : run.timed_out ? '**timed out**' : `**failed** (exit ${run.exit_code})`}`);
         passed = run.passed;
       }

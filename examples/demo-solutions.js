@@ -39,3 +39,51 @@ wordCount('one two three');          // 3
 \`\`\`
 `,
 };
+
+// decomp-mini: C that matches each function, plus a near miss (a `while`
+// loop where the original used `for`) of the kind people hand off with a note.
+export const DECOMP = {
+  Game_AddScore: `void Game_AddScore(s32 points) {
+    gScore += points * 10;
+}`,
+  Game_LoseLife: `s32 Game_LoseLife(void) {
+    if (gLives > 0) {
+        gLives--;
+    }
+    return gLives;
+}`,
+  Game_Clamp: `s32 Game_Clamp(s32 x, s32 lo, s32 hi) {
+    if (x < lo) {
+        return lo;
+    }
+    if (x > hi) {
+        return hi;
+    }
+    return x;
+}`,
+  Game_SumArray: `s32 Game_SumArray(s32 *arr, s32 n) {
+    s32 i;
+    s32 total = 0;
+
+    for (i = 0; i < n; i++) {
+        total += arr[i];
+    }
+    return total;
+}`,
+  Game_SumArray_nearMiss: `s32 Game_SumArray(s32 *arr, s32 n) {
+    s32 i = 0;
+    s32 total = 0;
+
+    while (i < n) {
+        total += arr[i++];
+    }
+    return total;
+}`,
+};
+
+/** Replace one INCLUDE_ASM stub in a C file's text with C. */
+export function decompile(text, symbol, code) {
+  const re = new RegExp(`^INCLUDE_ASM\\([^)]*\\b${symbol}\\);\\n`, 'm');
+  if (!re.test(text)) throw new Error(`no stub for ${symbol}`);
+  return text.replace(re, `${code}\n`);
+}

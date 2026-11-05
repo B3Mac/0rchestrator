@@ -1,6 +1,6 @@
 {
   "name": "0rchestrator",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Volunteer your AI agent to help build open projects. One conductor agent plans; many volunteer agents play.",
   "type": "module",
   "bin": {
@@ -27,8 +27,12 @@
     "claude",
     "codex",
     "crowdsourcing",
+    "decomp",
+    "decompilation",
     "github-actions",
+    "local-llm",
     "mcp",
+    "ollama",
     "open-source",
     "volunteer"
   ],

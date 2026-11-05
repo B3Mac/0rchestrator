@@ -37,6 +37,38 @@ and open a PR titled `T-0003: ...`. A trusted **scope** check and a sandboxed
 
 **[Full setup guide →](docs/GETTING-STARTED.md)** · **[Volunteer guide →](docs/VOLUNTEER.md)**
 
+## Made for decomp
+
+Matching decompilation is thousands of small puzzles with a perfect test each,
+and too many people burn tokens on the same functions. With 0rchestrator:
+
+```bash
+0rch init --github --decomp
+0rch decomp scan --create --limit 25   # one task per INCLUDE_ASM function, easiest first
+```
+
+- **One function per task.** A task may only change its own function, so many
+  people work in one file at once and their PRs merge cleanly.
+- **Notes carry forward.** Stuck at 93%? `/unclaim` with a note and a
+  decomp.me link, and the next person starts from there.
+- **No ROMs, ever.** Volunteers use their own game. Anyone trusted with the
+  game runs `0rch pr <n>` and comments `/verified`.
+
+**[Decomp guide →](docs/DECOMP.md)**
+
+## Use your own compute
+
+No AI plan? Point 0rchestrator at a model on your own GPU (Ollama, LM Studio,
+llama.cpp, vLLM). It applies the model's edits inside the task's scope, runs
+the check, and feeds failures back until it passes:
+
+```bash
+0rch run T-0042 --model qwen2.5-coder:14b --attempts 15
+0rch run --loop --as you          # local mode: keep going until nothing's left
+```
+
+**[Local models guide →](docs/LOCAL-MODELS.md)**
+
 ## See it in 10 seconds
 
 ```bash
@@ -45,8 +77,8 @@ npm install
 npm run demo
 ```
 
-The demo runs two real scenarios in a temp folder (only the AI's answers are
-simulated):
+The demo runs three real scenarios in a temp folder (only the AI's answers
+are simulated):
 
 1. **An open-source sprint.** Three volunteers build a small library in
    parallel. A saboteur rewrites a test to fake a pass, gets caught, flagged and
@@ -54,6 +86,10 @@ simulated):
 2. **A private client job.** A volunteer gets a sealed packet where the client's
    name reads `REDACTED_1`. Their work comes back, names are restored, and the
    tests run privately.
+3. **A decomp sprint.** `0rch decomp scan` turns asm stubs into tasks. Three
+   people match functions in one file at once, one gets caught editing
+   someone else's function, and a stuck volunteer's note helps a local model
+   finish the last one.
 
 ## Volunteer
 
@@ -181,18 +217,21 @@ The full format, statuses, ledger events and packet layout are in
 | Volunteers | `status`, `list [--ready]`, `next`, `play`, `claim`, `unclaim`, `prompt`, `verify`, `submit` |
 | Conductor | `plan`, `new`, `review`, `accept`, `reopen`, `release-expired` |
 | Trust | `players [--flagged]`, `player`, `flag`, `ban`, `unban` |
-| Owners | `init [--github \| --private]`, `doctor`, `collect`, `pack`, `unpack` |
+| Owners | `init [--github \| --private] [--decomp]`, `doctor`, `pr`, `collect`, `pack`, `unpack` |
+| Decomp | `decomp scan [--create --limit N]`, `decomp progress` |
+| Your own compute | `run [id \| --loop]`, `models` |
 | Agents | `mcp` |
 | GitHub workflow | `gh-event`, `check-pr` (run by the workflow, not by hand) |
 
-On GitHub issues: `/claim`, `/unclaim`, `/trust`, `/help`; maintainers also
+On GitHub issues: `/claim`, `/unclaim [note]`, `/note`, `/trust`, `/help`;
+on PRs, `/verified` (maintainers and trusted players); maintainers also
 `/release`, `/reopen`, `/flag`, `/ban`, `/unban`.
 
 Who you are comes from `--as`, then `$ORCH_VOLUNTEER`, then your git `user.name`.
 
 ## Status and roadmap
 
-Early prototype (v0.2). GitHub mode, the CLI, trust ledger, packets, fork
+Early prototype (v0.3). GitHub mode, the CLI, trust ledger, packets, fork
 collection and MCP server work and are tested (`npm test`). GitHub mode is
 tested against real git remotes and a simulated GitHub API; its first live
 runs will be in real repos. Next up, roughly in order:

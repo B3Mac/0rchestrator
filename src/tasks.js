@@ -120,7 +120,7 @@ export function nextId(tasks) {
  * For each task: can someone start it right now?
  * Open + every dependency done + no overlap with a task already in progress.
  */
-export function computeReadiness(tasks) {
+export function computeReadiness(tasks, { bySymbol = false } = {}) {
   const byId = new Map(tasks.map((t) => [t.meta.id, t]));
   const active = tasks.filter((t) => ACTIVE.includes(t.meta.status));
   const out = new Map();
@@ -136,13 +136,21 @@ export function computeReadiness(tasks) {
       else if (d.meta.status !== 'done') reasons.push(`waiting on ${dep}`);
     }
     for (const a of active) {
-      if (a !== t && scopesOverlap(t.meta.scope, a.meta.scope)) {
+      if (a !== t && scopesOverlap(t.meta.scope, a.meta.scope, { bySymbol })) {
         reasons.push(`scope overlaps ${a.meta.id}, which is in progress`);
       }
     }
     out.set(t.meta.id, { ready: reasons.length === 0, reasons });
   }
   return out;
+}
+
+/**
+ * Readiness with the project's rules. In GitHub mode work happens in separate
+ * forks, so different functions in one file can be worked on at once.
+ */
+export function readinessFor(project, tasks = loadTasks(project)) {
+  return computeReadiness(tasks, { bySymbol: project.config.workflow === 'github' });
 }
 
 export function newTaskBody({ goal, acceptance = [], notes } = {}) {
@@ -202,10 +210,24 @@ export function createTask(project, opts) {
 }
 
 /** Append a dated note under "## Review notes" in the task body. */
-export function addNote(task, text, who, now = new Date()) {
-  const line = `- ${now.toISOString().slice(0, 10)}${who ? ` (${who})` : ''}: ${text}`;
-  if (/^## Review notes\s*$/m.test(task.body)) task.body = task.body.trimEnd() + '\n' + line + '\n';
-  else task.body = task.body.trimEnd() + '\n\n## Review notes\n\n' + line + '\n';
+export function addNote(task, text, who, now = new Date(), heading = 'Review notes') {
+  const line = `- ${now.toISOString().slice(0, 10)}${who ? ` (${who})` : ''}: ${String(text).replace(/\s*\n\s*/g, ' ')}`;
+  const re = new RegExp(`^## ${heading}\\s*$`, 'm');
+  const m = task.body.match(re);
+  if (!m) {
+    task.body = task.body.trimEnd() + `\n\n## ${heading}\n\n` + line + '\n';
+    return;
+  }
+  // Append at the end of that section (before the next "## " heading, if any).
+  const after = m.index + m[0].length;
+  const next = task.body.slice(after).search(/^## /m);
+  const end = next === -1 ? task.body.length : after + next;
+  task.body = task.body.slice(0, end).trimEnd() + '\n' + line + '\n' + (next === -1 ? '' : '\n' + task.body.slice(end));
+}
+
+/** Leave a note for whoever takes the task next (a partial match, a decomp.me link, a dead end). */
+export function addAttempt(task, text, who, now = new Date()) {
+  addNote(task, text, who, now, 'Earlier attempts');
 }
 
 export function clearClaim(meta) {

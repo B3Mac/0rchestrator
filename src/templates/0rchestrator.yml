@@ -30,7 +30,7 @@ task_types:
     verify: {{verify}}
   docs:
     verify: null   # no automatic check; a reviewer reads it
-
+{{decomp}}
 # Trust: scores run 0-100 and everyone starts at starting_score.
 # Fences decide who can claim what. Only humans can flag or ban.
 trust:
@@ -47,4 +47,5 @@ trust:
     medium:    { min_score: 40, min_accepted: 1 }
     large:     { min_score: 60, min_accepted: 3 }
     sensitive: { min_score: 80, min_accepted: 5 }
+    verify:    { min_score: 70, min_accepted: 3 }   # may /verified someone else's PR
 {{private}}

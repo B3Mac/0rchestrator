@@ -8,6 +8,9 @@ merges.
 **You need:** a public GitHub repo, [Node.js](https://nodejs.org) 20 or newer,
 git, and an AI agent to be your conductor (Claude Code, Codex, ChatGPT…).
 
+**Decompilation project?** Read [DECOMP.md](DECOMP.md) too, and add
+`--decomp` in step 2.
+
 ## 1. Install the CLI
 
 ```bash
@@ -150,6 +153,8 @@ volunteer, closes the issue, and announces which tasks it unlocked.
 | --- | --- | --- |
 | Anyone | `/claim`, `/unclaim` | Take a task, give it back |
 | Anyone | `/trust @user` | Someone's trust score and record |
+| Claimer, maintainers | `/note <text>`, `/unclaim <note>` | Leave notes for the next person; they're in every handoff |
+| Maintainers, trusted players | `/verified` (on a PR) | They ran the full check locally (e.g. a decomp match) and it passes |
 | Maintainers | `/release` | Free a claim, no penalty |
 | Maintainers | `/reopen <note>` | Send work back (costs the volunteer trust) |
 | Maintainers | `/flag @user <reason>` | Mark a bad actor: −50 trust, their open work pulled back |

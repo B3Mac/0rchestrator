@@ -21,5 +21,9 @@ test('the showcase demo tells the story it claims', async () => {
   assert.equal(mallory.tier, 'fenced');
   assert.equal(mallory.accepted, 0);
   assert.equal(res.board.find((r) => r.name === 'dave').earned, 25);
-  assert.match(printed, /4 volunteers, 5 tasks accepted, 1 saboteur caught, test suite green, no client names leaked/);
+  assert.match(printed, /5 volunteers, 9 tasks accepted, 1 saboteur caught, test suite green, no client names leaked, decomp 100% matching/);
+  assert.ok(res.decomp.allMatch);
+  assert.equal(res.decomp.localRun.attempts, 2, 'the local model needed the feedback once');
+  assert.match(printed, /carol .*changes code outside Game_Clamp/);
+  assert.equal(res.board.find((r) => r.name === 'alice').accepted, 3);
 });

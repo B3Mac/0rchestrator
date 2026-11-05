@@ -4,8 +4,9 @@ import { spawnSync } from 'node:child_process';
 import YAML from 'yaml';
 import { loadProject, CONFIG_FILE } from './project.js';
 import { loadTasks, ACTIVE } from './tasks.js';
-import { scopesOverlap } from './scope.js';
+import { scopesOverlap, splitScope } from './scope.js';
 import { verifyCommandFor } from './verify.js';
+import { symbolRegion } from './symbols.js';
 import { isGitRepo } from './git.js';
 import { githubSlug, WORKFLOW_FILE, VERSION } from './init.js';
 
@@ -46,7 +47,11 @@ export function doctor(start = process.cwd()) {
   } catch (err) {
     error(err.message);
   }
-  if (!tasks.length) warn('No tasks yet. Run "0rch plan" and give the prompt to your conductor agent.');
+  if (!tasks.length) {
+    warn(config.task_types.decomp
+      ? 'No tasks yet. Run "0rch decomp scan --create --limit 25" to make one per asm function.'
+      : 'No tasks yet. Run "0rch plan" and give the prompt to your conductor agent.');
+  }
 
   const ids = new Set(tasks.map((t) => t.meta.id));
   const commands = new Set(config.setup ? [config.setup] : []);
@@ -56,16 +61,34 @@ export function doctor(start = process.cwd()) {
     for (const d of m.depends_on) if (!ids.has(d)) error(`${m.id} depends on ${d}, which doesn't exist.`);
     if (!config.task_types[m.type]) error(`${m.id} has type "${m.type}", which ${CONFIG_FILE} doesn't define.`);
     const cmd = verifyCommandFor(project, t);
-    if (cmd) commands.add(cmd);
+    if (cmd) commands.add(cmd.replace(/\{\w+\}/g, 'x'));
+    else if (m.type === 'decomp') error(`${m.id} is a decomp task with no match check. Set task_types.decomp.verify in ${CONFIG_FILE}.`);
     else if (m.type === 'code') warn(`${m.id} is code with no automatic check. Add a verify command, or a maintainer reviews every line.`);
+    for (const e of m.scope.map(splitScope).filter((x) => x.symbol)) {
+      const full = path.join(root, e.path);
+      if (!fs.existsSync(full)) error(`${m.id}'s scope names ${e.path}, which doesn't exist.`);
+      else if (!symbolRegion(fs.readFileSync(full, 'utf8'), e.symbol)) error(`${m.id}'s scope names ${e.symbol}, which isn't in ${e.path}.`);
+    }
   }
   const live = tasks.filter((t) => t.meta.status === 'open' || ACTIVE.includes(t.meta.status));
+  const bySymbol = config.workflow === 'github';
+  const sharedFiles = new Map();
   for (let i = 0; i < live.length; i++) {
     for (let j = i + 1; j < live.length; j++) {
       const [a, b] = [live[i].meta, live[j].meta];
       const linked = a.depends_on.includes(b.id) || b.depends_on.includes(a.id);
-      if (!linked && scopesOverlap(a.scope, b.scope)) warn(`${a.id} and ${b.id} have overlapping scopes and don't depend on each other; only one can be worked on at a time.`);
+      if (linked || !scopesOverlap(a.scope, b.scope, { bySymbol })) continue;
+      if (!scopesOverlap(a.scope, b.scope, { bySymbol: true })) {
+        // Different functions of the same file: fine in parallel on GitHub, one at a time locally.
+        const file = a.scope.map(splitScope).find((e) => e.symbol && b.scope.map(splitScope).some((f) => f.path === e.path))?.path;
+        sharedFiles.set(file, new Set([...(sharedFiles.get(file) ?? []), a.id, b.id]));
+      } else {
+        warn(`${a.id} and ${b.id} have overlapping scopes and don't depend on each other; only one can be worked on at a time.`);
+      }
     }
+  }
+  for (const [file, ids] of sharedFiles) {
+    warn(`${ids.size} tasks change different functions of ${file}. In local mode they run one at a time; in GitHub mode (workflow: github) they run in parallel.`);
   }
   for (const cmd of commands) {
     const bin = cmd.trim().split(/\s+/)[0];

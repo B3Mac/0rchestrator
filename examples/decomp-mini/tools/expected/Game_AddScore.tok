@@ -1,0 +1,1 @@
+void Game_AddScore ( s32 v0 ) { gScore += v0 * 10 ; }

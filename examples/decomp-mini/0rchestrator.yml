@@ -1,0 +1,62 @@
+# 0rchestrator project settings. Docs: https://github.com/B3Mac/0rchestrator/blob/main/docs/PROTOCOL.md
+name: "decomp-mini"
+
+# public: anyone can clone the repo and volunteer.
+# private: volunteers only get sealed, redacted task packets ("0rch pack").
+visibility: public
+
+# local: everyone works in one checkout, or sends forks/packets to the owner.
+# github: tasks become issues, volunteers /claim and open PRs (see "0rch init --github").
+workflow: local
+
+# Command run before checks in a fresh checkout (GitHub mode), e.g. npm ci.
+setup: null
+
+goal: GOAL.md
+roadmap: ROADMAP.md
+tasks_dir: tasks
+
+# Claims that sit untouched this long go back to the pool (and cost the player a little trust).
+claim_timeout_hours: 48
+verify_timeout_seconds: 600
+
+# What a task's reward is counted in. Credited when work is accepted.
+reward_unit: credits
+
+# Every task has a type. Each type says how its work is checked.
+# A task can override this with its own "verify:" command.
+task_types:
+  code:
+    verify: "npm test"
+  docs:
+    verify: null   # no automatic check; a reviewer reads it
+  decomp:
+    # One task per function. The check must prove the function now matches
+    # the original, using each volunteer's own copy of the game. Examples:
+    #   make && sha1sum -c baserom.sha1          (the ROM still matches; splat/N64)
+    #   ninja && objdiff-cli report ...          (GameCube/Wii, decomp-toolkit)
+    #   ./tools/check_match.sh {symbol}          (your own script)
+    # {symbol}, {file} and {task} are filled in per task.
+    verify: "node tools/match.js {symbol}"
+    # CI never has the game, so CI can't run the check above. Maintainers and
+    # trusted players run "0rch pr <number>" and comment /verified instead.
+    ci: false
+    ci_verify: "node tools/match.js --syntax {symbol}"   # what CI can check without the game
+
+# Trust: scores run 0-100 and everyone starts at starting_score.
+# Fences decide who can claim what. Only humans can flag or ban.
+trust:
+  starting_score: 50
+  points:
+    accepted: { small: 8, medium: 15, large: 25 }
+    reopened: -10
+    failed_submit: -3
+    scope_violation: -10
+    expired: -5
+    flagged: -50
+  fences:
+    small:     { min_score: 20, min_accepted: 0 }
+    medium:    { min_score: 40, min_accepted: 1 }
+    large:     { min_score: 60, min_accepted: 3 }
+    sensitive: { min_score: 80, min_accepted: 5 }
+    verify:    { min_score: 70, min_accepted: 3 }   # may /verified someone else's PR

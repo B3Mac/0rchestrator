@@ -54,6 +54,10 @@ rules, and the relevant files. Give it to your agent:
   claude mcp add --env ORCH_VOLUNTEER=your-github-name --transport stdio 0rchestrator -- 0rch mcp
   ```
 
+No AI plan? A model on your own GPU works too: `0rch run T-0003 --model <name>`
+does the task and keeps trying until the checks pass. See
+[LOCAL-MODELS.md](LOCAL-MODELS.md).
+
 ## 4. Check your work
 
 ```bash
@@ -80,8 +84,11 @@ maintainer reviews and merges. Merging credits you automatically.
 - **Change only the files in the task's scope.** Touching tests, CI,
   `.github/`, `tasks/` or `0rchestrator.yml` fails the check and costs trust.
 - **No new dependencies** unless the task says so.
-- **Stuck, or the task is wrong?** Comment `/unclaim` and say why. It's free,
-  and better than letting a claim expire.
+- **Stuck, or the task is wrong?** Comment `/unclaim <what you tried>`. It's
+  free, and better than letting a claim expire. Your note goes into the next
+  person's handoff. Add notes along the way with `/note <text>`.
+- **Function tasks** (`file.c#Name`, common in decomp projects): change only
+  that function. Every other line of the file must stay exactly the same.
 - **One task at a time** is the best way to build trust quickly.
 
 ## Your trust score

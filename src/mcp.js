@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OrchError } from './errors.js';
 import { loadProject } from './project.js';
-import { loadTasks, getTask, computeReadiness, createTask } from './tasks.js';
+import { loadTasks, getTask, readinessFor, createTask } from './tasks.js';
 import { describeVerify } from './verify.js';
 import { handoffPrompt, conductorPrompt, reviewPrompt } from './prompt.js';
 import {
@@ -48,7 +48,7 @@ export function createServer({ root = process.cwd() } = {}) {
 
   tool('orch_status', 'Project name, progress, and which tasks are ready to play.', {}, (project) => {
     const tasks = loadTasks(project);
-    const ready = computeReadiness(tasks);
+    const ready = readinessFor(project, tasks);
     const counts = {};
     for (const t of tasks) counts[t.meta.status] = (counts[t.meta.status] ?? 0) + 1;
     const readyIds = tasks.filter((t) => ready.get(t.meta.id).ready).map((t) => t.meta.id);
@@ -57,7 +57,7 @@ export function createServer({ root = process.cwd() } = {}) {
 
   tool('orch_list_tasks', 'List tasks with status, size, scope and whether each is ready.', { ready_only: z.boolean().optional() }, (project, { ready_only }) => {
     const tasks = loadTasks(project);
-    const ready = computeReadiness(tasks);
+    const ready = readinessFor(project, tasks);
     const rows = tasks
       .filter((t) => !ready_only || ready.get(t.meta.id).ready)
       .map((t) => ({
@@ -112,11 +112,16 @@ export function createServer({ root = process.cwd() } = {}) {
     },
   );
 
-  tool('orch_unclaim', 'Give a task back (for example if it is wrong or you are stuck). Explain why to the user.', { task_id: taskId, player }, (project, args) => {
+  tool(
+    'orch_unclaim',
+    'Give a task back (for example if it is wrong or you are stuck). Leave a note on what you tried (how close you got, what failed) so the next person starts from there.',
+    { task_id: taskId, player, note: z.string().optional().describe('What you tried and how far you got') },
+    (project, args) => {
     guardGithubMode(project, 'unclaim');
-    const task = unclaimTask(project, args.task_id, { player: args.player ? resolvePlayer(project, args.player) : undefined });
-    return `Released ${task.meta.id}.`;
-  });
+    const task = unclaimTask(project, args.task_id, { player: args.player ? resolvePlayer(project, args.player) : undefined, note: args.note });
+    return `Released ${task.meta.id}.${args.note ? ' Your note is in the next handoff.' : ''}`;
+  },
+  );
 
   tool('orch_player', "A volunteer's trust score, tier and track record.", { player }, (project, args) => {
     const { history, ...s } = statsFor(project, resolvePlayer(project, args.player));

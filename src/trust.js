@@ -7,7 +7,7 @@ import { OrchError } from './errors.js';
 
 export const EVENT_TYPES = [
   'claimed', 'released', 'expired', 'submitted', 'failed_submit', 'scope_violation',
-  'accepted', 'reopened', 'flagged', 'banned', 'unbanned',
+  'accepted', 'reopened', 'flagged', 'banned', 'unbanned', 'verified',
 ];
 
 export function playerKey(name) {
@@ -71,6 +71,7 @@ function freshStats(name, trust) {
     flags: [],
     banned: false,
     ban_reason: null,
+    verified: 0,
     earned: 0,
     first_seen: null,
     last_seen: null,
@@ -119,6 +120,9 @@ export function playerStats(project, events = readLedger(project)) {
       case 'unbanned':
         s.banned = false;
         s.ban_reason = null;
+        break;
+      case 'verified':
+        s.verified++;
         break;
       default:
     }
@@ -171,6 +175,12 @@ export function canClaim(stats, task, trust) {
     }
   }
   return { ok: true };
+}
+
+/** May this player confirm someone else's work (e.g. a decomp match CI can't check)? */
+export function canVerify(stats, trust) {
+  const fence = trust.fences.verify ?? { min_score: 70, min_accepted: 3 };
+  return !stats.banned && meets(stats, fence);
 }
 
 /** Players worth a maintainer's attention: banned, fenced, flagged, or caught outside scope. */

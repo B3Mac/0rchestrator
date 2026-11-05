@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.0
+
+**Decomp projects, and your own compute.**
+
+- **Function-level scopes:** `src/game.c#Actor_Init` lets a task change only
+  that function (its `INCLUDE_ASM` / `GLOBAL_ASM` stub, `NON_MATCHING` block,
+  or C definition). Enforced in `verify`, both PR checks, `collect` and
+  packets. In GitHub mode, different functions of one file can be worked at
+  the same time.
+- `0rch decomp scan [--create --limit N --per-file]`: one task per function
+  still in asm, sized by instruction count, smallest first.
+  `0rch decomp progress`.
+- `0rch init --decomp`: a `decomp` task type whose check runs locally
+  (`ci: false`), with an optional `ci_verify` for CI.
+- Check commands can use `{symbol}`, `{file}` and `{task}` (also
+  `$ORCH_SYMBOL`, `$ORCH_FILE`, `$ORCH_TASK`).
+- `0rch pr <n>`: check a PR on your own machine (scope first, then the full
+  check), then comment `/verified`. `/verified` needs a maintainer or the new
+  `verify` trust fence (70+, 3 accepted), and never your own PR.
+- **Notes carry forward:** `/unclaim <note>`, `/note <text>`,
+  `0rch unclaim --note`, and `0rch note` add to "Earlier attempts", which is
+  in every future handoff.
+- **`0rch run`:** let a local model (Ollama, LM Studio, llama.cpp, vLLM, or
+  any OpenAI-compatible API) do a task. It only applies edits inside the
+  scope, splices function answers into place, runs the check, feeds failures
+  back, and puts files back if it never passes. `--loop` works through tasks
+  in local mode. Also `0rch models`.
+- `collect` and `unpack` now do a real three-way merge, so work on different
+  parts of a file no longer overwrites changes merged in the meantime.
+  Overlapping changes are reported as conflicts, with no trust penalty.
+- `doctor` checks that function scopes exist and that decomp tasks have a
+  match check.
+- New guides: [DECOMP.md](docs/DECOMP.md), [LOCAL-MODELS.md](docs/LOCAL-MODELS.md).
+  New example: [examples/decomp-mini](examples/decomp-mini). The demo gains
+  act 3.
+
 ## 0.2.0
 
 **GitHub mode: put 0rchestrator in a real project today.**

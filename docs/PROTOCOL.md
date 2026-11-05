@@ -1,4 +1,4 @@
-# The 0rchestrator protocol (v0.2)
+# The 0rchestrator protocol (v0.3)
 
 Any git repo that follows this layout can take volunteers. The `0rch` CLI and
 MCP server implement it; nothing else is required.
@@ -75,16 +75,43 @@ A task is Markdown with YAML front matter:
 | `sensitive` | `true` for security, CI, auth, secrets, payments, dependencies or infrastructure |
 | `reward` | Optional number, credited on acceptance |
 | `depends_on` | Task ids that must be `done` first |
-| `scope` | The only paths this task may create, change or delete. Files, folders (`src/`) or globs (`src/**/*.js`) |
+| `scope` | The only paths this task may create, change or delete. Files, folders (`src/`) or globs (`src/**/*.js`). `file#Name` limits a file to one function (see below) |
 | `context` | Read-only files shown to the volunteer's AI |
-| `verify` | Optional command that overrides the type's |
+| `verify` | Optional command that overrides the type's. `{task}`, `{symbol}`, `{symbols}` and `{file}` are filled in |
+| `ci`, `ci_verify` | Optional overrides of the type's (see "Checks CI can't run") |
 | `claimed_by`, `claimed_at`, `base` | Set on claim (`base` = the commit the work starts from) |
 | `submitted_at`, `submitted_files` | Set on submit (`submitted_files` = a sha256 of each submitted file) |
 | `completed_at` | Set on accept |
 | `pr` | GitHub mode: the pull request that finished it |
 
 The body has `## Goal`, `## Acceptance criteria` and `## Notes`. Reopening
-adds dated lines under `## Review notes`.
+adds dated lines under `## Review notes`. Notes left with `/unclaim <note>`,
+`/note`, `0rch unclaim --note` or `0rch note` go under `## Earlier attempts`.
+Both are part of every handoff.
+
+### Function scopes
+
+`src/game.c#Actor_Init` allows changing only the part of `src/game.c` that
+holds `Actor_Init`:
+
+- its `INCLUDE_ASM(..., Actor_Init)` or `#pragma GLOBAL_ASM(".../Actor_Init.s")`
+  line,
+- or the whole `#if(def|ndef) NON_MATCHING ... #else ... #endif` block around
+  that stub,
+- or its C definition, including return-type lines just above its name.
+
+Every other byte of the file must be unchanged (line endings aside). A file
+named both with and without `#` is fully in scope. In GitHub mode, tasks
+naming different functions of the same file don't overlap; in local mode
+they do (one shared checkout).
+
+### Checks CI can't run
+
+A task type with `ci: false` has a `verify` that needs files CI doesn't have
+(for decomp, the original game). The tests job then runs `ci_verify` if set,
+and otherwise passes with a note. Maintainers and players meeting the
+`verify` fence run `0rch pr <number>` (scope first, then `verify` on the PR's
+code) and comment `/verified`, which records a `verified` event.
 
 ### Ready
 
@@ -131,7 +158,7 @@ One JSON object per line:
 
 | Event | Points (default) |
 | --- | --- |
-| `claimed`, `released`, `submitted`, `banned`, `unbanned` | 0 |
+| `claimed`, `released`, `submitted`, `banned`, `unbanned`, `verified` | 0 |
 | `accepted` | +8 / +15 / +25 by size |
 | `reopened` | −10 (0 when `penalty: false`) |
 | `failed_submit` | −3 |
@@ -181,7 +208,9 @@ protected: the scope job, which a PR can't touch, fails it.
 | Command | Who | Effect |
 | --- | --- | --- |
 | `/claim` | Anyone | Claim this issue's task (subject to readiness and fences) |
-| `/unclaim` | The claimer, or a maintainer | Release it, no penalty |
+| `/unclaim [note]` | The claimer, or a maintainer | Release it, no penalty; the note goes under Earlier attempts |
+| `/note <text>` | The claimer, or a maintainer | Add to Earlier attempts |
+| `/verified [note]` (on a PR) | Maintainer, or a player meeting the `verify` fence; never the PR's author | Record a `verified` event |
 | `/trust [@user]` | Anyone | Reply with a trust record |
 | `/help` | Anyone | List commands |
 | `/release` | Maintainer | Release someone's claim, no penalty |

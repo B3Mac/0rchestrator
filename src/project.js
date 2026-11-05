@@ -41,6 +41,7 @@ export const DEFAULTS = {
       medium: { min_score: 40, min_accepted: 1 },
       large: { min_score: 60, min_accepted: 3 },
       sensitive: { min_score: 80, min_accepted: 5 },
+      verify: { min_score: 70, min_accepted: 3 },   // may /verified someone else's PR
     },
   },
   private: {

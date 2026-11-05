@@ -61,7 +61,21 @@ function guessCommands(root) {
 const yamlValue = (v) => (v === null || v === undefined ? 'null' : JSON.stringify(v));
 
 /** Set up 0rchestrator files in `dir`. Existing files are left alone. */
-export function initProject(dir, { name, isPrivate = false, github = false, branch } = {}) {
+const DECOMP_BLOCK = `  decomp:
+    # One task per function. The check must prove the function now matches
+    # the original, using each volunteer's own copy of the game. Examples:
+    #   make && sha1sum -c baserom.sha1          (the ROM still matches; splat/N64)
+    #   ninja && objdiff-cli report ...          (GameCube/Wii, decomp-toolkit)
+    #   ./tools/check_match.sh {symbol}          (your own script)
+    # {symbol}, {file} and {task} are filled in per task.
+    verify: null
+    # CI never has the game, so CI can't run the check above. Maintainers and
+    # trusted players run "0rch pr <number>" and comment /verified instead.
+    ci: false
+    ci_verify: null    # optional: something CI can run, e.g. a syntax-only compile
+`;
+
+export function initProject(dir, { name, isPrivate = false, github = false, decomp = false, branch } = {}) {
   const root = path.resolve(dir);
   const projectName = name || path.basename(root);
   const guess = guessCommands(root);
@@ -95,10 +109,22 @@ export function initProject(dir, { name, isPrivate = false, github = false, bran
       .replaceAll('{{version}}', VERSION)
       .replaceAll('{{branch}}', mainBranch)
       .replaceAll('{{tasks_dir}}', 'tasks')
-      .replaceAll('{{label}}', '0rchestrator');
+      .replaceAll('{{label}}', '0rchestrator')
+      .replaceAll('{{decomp}}', decomp ? DECOMP_BLOCK : '');
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, text);
     created.push(rel);
+  }
+
+  // An existing project adding the decomp task type.
+  if (decomp && skipped.includes(CONFIG_FILE)) {
+    const file = path.join(root, CONFIG_FILE);
+    const text = fs.readFileSync(file, 'utf8');
+    if (!(YAML.parse(text)?.task_types ?? {}).decomp) {
+      if (!/^task_types:\s*$/m.test(text)) throw new Error(`${CONFIG_FILE} has no "task_types:" block to add "decomp" to.`);
+      fs.writeFileSync(file, text.replace(/^task_types:\s*\n/m, (m) => m + DECOMP_BLOCK));
+      updated.push(`${CONFIG_FILE} (decomp task type)`);
+    }
   }
 
   // An existing local-mode project switching to GitHub mode.

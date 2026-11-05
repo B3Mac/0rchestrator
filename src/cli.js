@@ -6,14 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { OrchError } from './errors.js';
 import { loadProject } from './project.js';
 import {
-  loadTasks, getTask, computeReadiness, createTask,
+  loadTasks, getTask, readinessFor, createTask, addAttempt,
 } from './tasks.js';
 import { describeVerify } from './verify.js';
 import { handoffPrompt, conductorPrompt, reviewPrompt } from './prompt.js';
 import {
   resolvePlayer, claimTask, unclaimTask, play, claimableTasks, submitTask, acceptTask, reopenTask,
   releaseExpired, flagPlayer, banPlayer, unbanPlayer, listPlayers, collectFork, checkTask,
-  guardGithubMode, pullRequestHint,
+  guardGithubMode, pullRequestHint, noteTask,
 } from './ops.js';
 import { statsFor, isFlagged } from './trust.js';
 import { packTask, unpackTask } from './packet.js';
@@ -59,15 +59,22 @@ function command(name, { args = '', summary, options = {}, run, group = 'Volunte
 command('init', {
   group: 'Project owners',
   summary: 'Set up 0rchestrator here (--github: tasks become issues, volunteers send PRs)',
-  options: { name: { type: 'string' }, private: { type: 'boolean' }, github: { type: 'boolean' }, branch: { type: 'string' } },
+  options: { name: { type: 'string' }, private: { type: 'boolean' }, github: { type: 'boolean' }, decomp: { type: 'boolean' }, branch: { type: 'string' } },
   run({ values }) {
     if (values.github && values.private) throw new OrchError('Private projects use packets, not public issues. Pick --github or --private.', 'USAGE');
-    const res = initProject(values.root || process.cwd(), { name: values.name, isPrivate: values.private, github: values.github, branch: values.branch });
+    const res = initProject(values.root || process.cwd(), {
+      name: values.name, isPrivate: values.private, github: values.github, decomp: values.decomp, branch: values.branch,
+    });
     res.created.forEach((f) => out(`${c.green('created')}  ${f}`));
     res.updated.forEach((f) => out(`${c.yellow('updated')}  ${f}`));
     res.skipped.forEach((f) => out(`${c.dim('exists')}   ${f}`));
+    if (values.decomp) {
+      out(`\n${c.bold('Decomp project:')} set task_types.decomp.verify in 0rchestrator.yml to your match check, then`);
+      out(`run ${c.bold('0rch decomp scan')} to see the functions still in asm, and ${c.bold('0rch decomp scan --create --limit 25')} to make tasks.`);
+      out('Guide: https://github.com/B3Mac/0rchestrator/blob/main/docs/DECOMP.md');
+    }
     if (!values.github) {
-      out(`\nNext: write GOAL.md, then run ${c.bold('0rch plan')} and give that prompt to your conductor agent.`);
+      if (!values.decomp) out(`\nNext: write GOAL.md, then run ${c.bold('0rch plan')} and give that prompt to your conductor agent.`);
       return;
     }
     out(`\n${c.bold('Next steps')}`);
@@ -102,7 +109,7 @@ command('status', {
   options: { json: { type: 'boolean' } },
   run({ project, values }) {
     const tasks = loadTasks(project);
-    const ready = computeReadiness(tasks);
+    const ready = readinessFor(project, tasks);
     const counts = Object.fromEntries(['open', 'claimed', 'review', 'done', 'blocked'].map((s) => [s, tasks.filter((t) => t.meta.status === s).length]));
     const readyIds = tasks.filter((t) => ready.get(t.meta.id).ready).map((t) => t.meta.id);
     const players = new Set(tasks.filter((t) => t.meta.claimed_by && t.meta.status !== 'done').map((t) => t.meta.claimed_by));
@@ -121,7 +128,7 @@ command('list', {
   options: { status: { type: 'string' }, ready: { type: 'boolean' }, json: { type: 'boolean' } },
   run({ project, values }) {
     let tasks = loadTasks(project);
-    const ready = computeReadiness(tasks);
+    const ready = readinessFor(project, tasks);
     if (values.status) tasks = tasks.filter((t) => t.meta.status === values.status);
     if (values.ready) tasks = tasks.filter((t) => ready.get(t.meta.id).ready);
     if (values.json) return out(JSON.stringify(tasks.map((t) => ({ ...t.meta, ready: ready.get(t.meta.id).ready })), null, 2));
@@ -178,11 +185,148 @@ command('claim', {
 command('unclaim', {
   args: '<id>',
   summary: 'Give a task back so someone else can take it',
-  options: { as: { type: 'string' } },
+  options: { as: { type: 'string' }, note: { type: 'string' } },
   run({ project, values, positionals: [id] }) {
     guardGithubMode(project, 'unclaim');
-    const task = unclaimTask(project, need(id, 'task id'), { player: values.as });
-    out(`Released ${task.meta.id}. It's open again.`);
+    const task = unclaimTask(project, need(id, 'task id'), { player: values.as, note: values.note });
+    out(`Released ${task.meta.id}. It's open again.${values.note ? ' Your note is in the next handoff.' : ''}`);
+  },
+});
+
+command('note', {
+  args: '<id> <text>',
+  summary: 'Leave a note for the next person (how close you got, a decomp.me link)',
+  options: { as: { type: 'string' } },
+  run({ project, values, positionals: [id, ...words] }) {
+    if (project.config.workflow === 'github') throw new OrchError('In GitHub mode, comment `/note <text>` on the task\'s issue.', 'GITHUB_MODE');
+    const task = noteTask(project, need(id, 'task id'), { note: words.join(' '), by: resolvePlayer(project, values.as) });
+    out(`Noted on ${task.meta.id}.`);
+  },
+});
+
+command('run', {
+  group: 'Your own compute',
+  args: '[id]',
+  summary: 'Let a local model (Ollama, LM Studio, llama.cpp…) do a task, checking and retrying',
+  options: {
+    model: { type: 'string' }, endpoint: { type: 'string' }, 'api-key': { type: 'string' }, as: { type: 'string' },
+    attempts: { type: 'string' }, temperature: { type: 'string' }, timeout: { type: 'string' }, 'context-chars': { type: 'string' },
+    submit: { type: 'boolean' }, keep: { type: 'boolean' }, loop: { type: 'boolean' }, 'max-tasks': { type: 'string' }, 'stop-on-fail': { type: 'boolean' },
+  },
+  async run({ project, values, positionals: [id] }) {
+    const { runTask, runLoop, DEFAULT_ENDPOINT, listModels } = await import('./runner.js');
+    const endpoint = values.endpoint || process.env.ORCH_LLM_ENDPOINT || DEFAULT_ENDPOINT;
+    const apiKey = values['api-key'] || process.env.ORCH_LLM_API_KEY || undefined;
+    let model = values.model || process.env.ORCH_LLM_MODEL;
+    if (!model) {
+      const models = await listModels({ endpoint, apiKey });
+      if (models.length !== 1) {
+        throw new OrchError(`Pick a model with --model.${models.length ? ` ${endpoint} has: ${models.join(', ')}` : ` ${endpoint} lists none; "ollama pull qwen2.5-coder:14b" gets one.`}`, 'USAGE');
+      }
+      [model] = models;
+    }
+    const num = (v, d) => (v === undefined ? d : Number(v));
+    const opts = {
+      player: resolvePlayer(project, values.as), endpoint, model, apiKey,
+      attempts: num(values.attempts, 3), temperature: num(values.temperature, 0.2), timeoutSeconds: num(values.timeout, 600),
+      contextChars: num(values['context-chars'], 24000), submit: values.submit, keep: values.keep,
+      maxTasks: num(values['max-tasks'], Infinity), stopOnFail: values['stop-on-fail'],
+      log: (m) => process.stderr.write(`${c.dim(m)}\n`),
+    };
+    process.stderr.write(c.dim(`Using ${model} at ${endpoint}\n`));
+    if (values.loop) {
+      const results = await runLoop(project, opts);
+      const won = results.filter((r) => r.passed);
+      out(`\n${won.length}/${results.length} task${results.length === 1 ? '' : 's'} passed${won.length ? `: ${won.map((r) => r.task.meta.id).join(', ')} (submitted for review)` : ''}.`);
+      return results.length && !won.length ? 2 : 0;
+    }
+    const res = await runTask(project, need(id, 'task id (or --loop)'), opts);
+    const tokens = res.usage.prompt_tokens + res.usage.completion_tokens;
+    out(colorVerify(describeVerify(res.verify)));
+    out(`\n${res.passed ? c.green(`Passed on attempt ${res.attempts}.`) : c.red(`Didn't pass in ${res.attempts} attempt${res.attempts === 1 ? '' : 's'}.`)}${tokens ? ` ${tokens.toLocaleString()} tokens of your own compute.` : ''}`);
+    out(c.dim(`Every attempt is saved in ${res.runDir}`));
+    if (res.passed && project.config.workflow === 'github') out(`\n${pullRequestHint(res.task)}`);
+    else if (res.passed && !values.submit) out(`\nLook it over, then: 0rch submit ${res.task.meta.id}`);
+    else if (!res.passed) out(`\nFiles were put back${values.keep ? ' (except with --keep: they were left as the last attempt)' : ''}. Try more --attempts, a bigger model, or leave a note: 0rch ${project.config.workflow === 'github' ? '(comment /note on the issue)' : `note ${res.task.meta.id} "..."`}`);
+    return res.passed ? 0 : 2;
+  },
+});
+
+command('models', {
+  group: 'Your own compute',
+  summary: 'List the models your local server offers',
+  options: { endpoint: { type: 'string' }, 'api-key': { type: 'string' } },
+  async run({ values }) {
+    const { listModels, DEFAULT_ENDPOINT } = await import('./runner.js');
+    const endpoint = values.endpoint || process.env.ORCH_LLM_ENDPOINT || DEFAULT_ENDPOINT;
+    const models = await listModels({ endpoint, apiKey: values['api-key'] || process.env.ORCH_LLM_API_KEY });
+    out(models.length ? models.join('\n') : c.dim(`${endpoint} has no models. With Ollama: ollama pull qwen2.5-coder:14b`));
+  },
+});
+
+command('pr', {
+  group: 'Project owners',
+  args: '<number>',
+  summary: "Check a PR on your machine: scope, then its full check (e.g. a decomp match)",
+  options: { task: { type: 'string' }, remote: { type: 'string' }, 'scope-only': { type: 'boolean' } },
+  async run({ project, values, positionals: [number] }) {
+    const { checkPrLocally } = await import('./prcheck.js');
+    const res = checkPrLocally(project, need(number, 'PR number'), {
+      task: values.task, remote: values.remote || 'origin', run: !values['scope-only'], log: (m) => process.stderr.write(`${c.dim(m)}\n`),
+    });
+    out(`PR #${number} → ${res.id} · ${res.task.meta.title}`);
+    if (!res.scopeOk) {
+      out(c.red('Scope: FAILED') + ' (nothing was run):');
+      res.report.reasons.forEach((r) => out(`  - ${r.replace(/`/g, '')}`));
+      return 2;
+    }
+    out(`Scope: ${c.green('ok')} (${res.files.join(', ')})`);
+    if (!res.check) {
+      out(values['scope-only'] ? c.dim('Full check skipped (--scope-only).') : 'No check command for this task; review it by hand.');
+      return 0;
+    }
+    out(`Check: ${res.check.passed ? c.green('PASSED') : c.red('FAILED')} ("${res.check.cmd}" exited ${res.check.exit_code})`);
+    if (!res.check.passed && res.check.output) out(res.check.output.trimEnd());
+    if (res.passed) out(`\nComment ${c.bold('/verified')} on PR #${number} so everyone knows it matches.`);
+    return res.passed ? 0 : 2;
+  },
+});
+
+command('decomp', {
+  group: 'Decomp projects',
+  args: 'scan|progress',
+  summary: 'scan: one task per function still in asm · progress: how much is decompiled',
+  options: {
+    dir: { type: 'string', multiple: true }, create: { type: 'boolean' }, limit: { type: 'string' }, 'per-file': { type: 'boolean' },
+    type: { type: 'string' }, verify: { type: 'string' }, json: { type: 'boolean' },
+  },
+  async run({ project, values, positionals: [sub] }) {
+    const { decompScan, decompProgress } = await import('./decomp.js');
+    const dirs = splitList(values.dir);
+    if (sub === 'progress') {
+      const p = decompProgress(project, { dirs });
+      if (values.json) return out(JSON.stringify(p, null, 2));
+      out(`${bar(p.percent / 100)} ${p.percent}%  ${p.decompiled}/${p.functions} functions in C, ${p.asm} still asm`);
+      out(`Tasks: ${p.tasks.done} done · ${p.tasks.review} in review · ${p.tasks.claimed} claimed · ${p.tasks.open} open`);
+      const top = p.perFile.filter((f) => f.asm).slice(0, 8);
+      if (top.length) out(`\nMost asm left:\n${table(top.map((f) => [f.file, f.asm, f.c]), ['FILE', 'ASM', 'C'])}`);
+      return 0;
+    }
+    if (sub !== 'scan') throw new OrchError('Use "0rch decomp scan" or "0rch decomp progress".', 'USAGE');
+    const res = decompScan(project, {
+      dirs, create: values.create, limit: values.limit ? Number(values.limit) : Infinity, perFile: values['per-file'], type: values.type || 'decomp', verify: values.verify ?? null,
+    });
+    if (values.json) return out(JSON.stringify(res, null, 2));
+    out(`${res.total} function${res.total === 1 ? '' : 's'} still in asm; ${res.alreadyTasked} already have a task; ${res.planned} new task${res.planned === 1 ? '' : 's'} possible.`);
+    if (res.missingAsm) out(c.yellow(`${res.missingAsm} have no extracted .s file yet, so their size is a guess. Run your project's setup (with your own copy of the game) for better sizing.`));
+    if (res.chosen.length) {
+      out('');
+      out(table(res.chosen.slice(0, 40).map((p) => [p.size, p.instructions ?? '?', p.scope.join(', ')]), ['SIZE', 'INSNS', 'SCOPE']));
+      if (res.chosen.length > 40) out(c.dim(`… and ${res.chosen.length - 40} more`));
+    }
+    if (res.created.length) out(`\n${c.green('Created')} ${res.created.length} task${res.created.length === 1 ? '' : 's'}: ${res.created[0]}…${res.created.at(-1)}. Commit and push to open their issues.`);
+    else if (res.chosen.length) out(`\nAdd ${c.bold('--create')} to make these tasks${values.limit ? '' : ` (tip: ${c.bold('--limit 25')} to start with the easiest)`}.`);
+    return 0;
   },
 });
 
@@ -525,7 +669,7 @@ export async function main(argv = process.argv.slice(2)) {
       allowPositionals: true,
       strict: true,
     });
-    const standalone = ['init', 'mcp', 'doctor', 'gh-event', 'check-pr'];
+    const standalone = ['init', 'mcp', 'doctor', 'gh-event', 'check-pr', 'models'];
     const project = standalone.includes(name) ? null : loadProject(values.root || process.cwd());
     const code = await cmd.run({ project, values, positionals });
     return code ?? 0;

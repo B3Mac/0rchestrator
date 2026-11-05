@@ -75,5 +75,24 @@ export function githubClient({
       return [...new Set(files.flatMap((f) => [f.filename, f.previous_filename].filter(Boolean)))];
     },
     listOpenPulls: () => paginate(`${r}/pulls?state=open`),
+    /** The commit a PR branched from, so only its own changes are compared. */
+    async mergeBase(base, head) {
+      const cmp = await request('GET', `${r}/compare/${base}...${head}`);
+      return cmp.merge_base_commit.sha;
+    },
+    /** A file's text at a commit, or null if it doesn't exist there. */
+    async fileAt(file, ref) {
+      try {
+        const meta = await request('GET', `${r}/contents/${file.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`);
+        if (Array.isArray(meta) || meta.type !== 'file') return null;
+        if (meta.encoding === 'base64' && meta.content) return Buffer.from(meta.content, 'base64').toString('utf8');
+        // Files over 1 MB come without content: fetch the blob instead.
+        const blob = await request('GET', `${r}/git/blobs/${meta.sha}`);
+        return Buffer.from(blob.content, 'base64').toString('utf8');
+      } catch (err) {
+        if (err.status === 404) return null;
+        throw err;
+      }
+    },
   };
 }
