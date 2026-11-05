@@ -1,0 +1,42 @@
+# 0rchestrator project settings. Docs: https://github.com/B3Mac/0rchestrator/blob/main/docs/PROTOCOL.md
+name: "0rchestrator"
+
+# public: anyone can clone the repo and volunteer.
+# private: volunteers only get sealed, redacted task packets ("0rch pack").
+visibility: public
+
+goal: GOAL.md
+roadmap: ROADMAP.md
+tasks_dir: tasks
+
+# Claims that sit untouched this long go back to the pool (and cost the player a little trust).
+claim_timeout_hours: 48
+verify_timeout_seconds: 600
+
+# What a task's reward is counted in. Credited when work is accepted.
+reward_unit: credits
+
+# Every task has a type. Each type says how its work is checked.
+# A task can override this with its own "verify:" command.
+task_types:
+  code:
+    verify: npm test --silent
+  docs:
+    verify: null   # no automatic check; a reviewer reads it
+
+# Trust: scores run 0-100 and everyone starts at starting_score.
+# Fences decide who can claim what. Only humans can flag or ban.
+trust:
+  starting_score: 50
+  points:
+    accepted: { small: 8, medium: 15, large: 25 }
+    reopened: -10
+    failed_submit: -3
+    scope_violation: -10
+    expired: -5
+    flagged: -50
+  fences:
+    small:     { min_score: 20, min_accepted: 0 }
+    medium:    { min_score: 40, min_accepted: 1 }
+    large:     { min_score: 60, min_accepted: 3 }
+    sensitive: { min_score: 80, min_accepted: 5 }

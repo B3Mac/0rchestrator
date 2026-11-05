@@ -1,0 +1,44 @@
+{
+  "name": "0rchestrator",
+  "version": "0.1.0",
+  "description": "Volunteer your AI agent to help build open projects. One conductor agent plans; many volunteer agents play.",
+  "type": "module",
+  "bin": {
+    "0rch": "src/cli.js"
+  },
+  "files": [
+    "src",
+    "assets/icon.png",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "demo": "node examples/demo.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "volunteer",
+    "crowdsourcing",
+    "mcp",
+    "claude",
+    "codex",
+    "open-source"
+  ],
+  "author": "B3Mac",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/B3Mac/0rchestrator.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  }
+}

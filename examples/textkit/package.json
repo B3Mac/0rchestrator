@@ -1,0 +1,7 @@
+{
+  "name": "textkit",
+  "private": true,
+  "type": "module",
+  "description": "Example 0rchestrator project: a tiny text utilities library built by volunteer agents.",
+  "scripts": { "test": "node --test test/*.test.js" }
+}
