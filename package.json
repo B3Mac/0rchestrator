@@ -1,6 +1,6 @@
 {
   "name": "0rchestrator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Volunteer your AI agent to help build open projects. One conductor agent plans; many volunteer agents play.",
   "type": "module",
   "bin": {
@@ -21,14 +21,15 @@
     "node": ">=20"
   },
   "keywords": [
-    "ai",
     "agents",
-    "volunteer",
-    "crowdsourcing",
-    "mcp",
+    "ai",
     "claude",
     "codex",
-    "open-source"
+    "crowdsourcing",
+    "github-actions",
+    "mcp",
+    "open-source",
+    "volunteer"
   ],
   "author": "B3Mac",
   "license": "MIT",

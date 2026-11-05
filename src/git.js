@@ -142,6 +142,19 @@ export function commitPaths(root, paths, message) {
   return headSha(root);
 }
 
+/** Files under `dir` (relative to root) at a commit, relative to root. */
+export function filesAt(root, ref, dir) {
+  const prefix = repoPrefix(root);
+  try {
+    return git(root, ['ls-tree', '-r', '--name-only', ref, '--', `${prefix}${dir}`])
+      .split('\n')
+      .filter(Boolean)
+      .map((p) => p.slice(prefix.length));
+  } catch {
+    return [];
+  }
+}
+
 export function trackedFiles(root) {
   try {
     return git(root, ['ls-files', '-co', '--exclude-standard'])

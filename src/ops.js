@@ -28,12 +28,12 @@ function samePlayer(a, b) {
   return playerKey(a) === playerKey(b);
 }
 
-/** Return claims older than the timeout to the pool. */
-export function releaseExpired(project, { now = new Date() } = {}) {
+/** Return claims older than the timeout to the pool (except task ids in `keep`, e.g. ones with an open PR). */
+export function releaseExpired(project, { now = new Date(), keep = new Set() } = {}) {
   const hours = project.config.claim_timeout_hours;
   const released = [];
   for (const task of loadTasks(project)) {
-    if (task.meta.status !== 'claimed' || !task.meta.claimed_at) continue;
+    if (task.meta.status !== 'claimed' || !task.meta.claimed_at || keep.has(task.meta.id)) continue;
     const age = (now - new Date(task.meta.claimed_at)) / 36e5;
     if (age < hours) continue;
     const player = task.meta.claimed_by;
